@@ -32,6 +32,9 @@ func NewServerCommand(ctx context.Context, out, errOut io.Writer) *cobra.Command
 	cmd := &cobra.Command{
 		Short: "Launch an API extensions API server",
 		Long:  "Launch an API extensions API server",
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return o.ServerRunOptions.ComponentGlobalsRegistry.Set()
+		},
 		RunE: func(c *cobra.Command, args []string) error {
 			if err := o.Complete(); err != nil {
 				return err

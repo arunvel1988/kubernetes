@@ -226,8 +226,8 @@ type PodFailurePolicyRule struct {
 	//   running pods are terminated.
 	// - FailIndex: indicates that the pod's index is marked as Failed and will
 	//   not be restarted.
-	//   This value is alpha-level. It can be used when the
-	//   `JobBackoffLimitPerIndex` feature gate is enabled (disabled by default).
+	//   This value is beta-level. It can be used when the
+	//   `JobBackoffLimitPerIndex` feature gate is enabled (enabled by default).
 	// - Ignore: indicates that the counter towards the .backoffLimit is not
 	//   incremented and a replacement pod is created.
 	// - Count: indicates that the pod is handled in the default way - the
@@ -330,8 +330,6 @@ type JobSpec struct {
 	// checked against the backoffLimit. This field cannot be used in combination
 	// with .spec.podTemplate.spec.restartPolicy=OnFailure.
 	//
-	// This field is beta-level. It can be used when the `JobPodFailurePolicy`
-	// feature gate is enabled (enabled by default).
 	// +optional
 	PodFailurePolicy *PodFailurePolicy
 
@@ -341,8 +339,8 @@ type JobSpec struct {
 	// When the field is specified, it must be immutable and works only for the Indexed Jobs.
 	// Once the Job meets the SuccessPolicy, the lingering pods are terminated.
 	//
-	// This field  is alpha-level. To use this field, you must enable the
-	// `JobSuccessPolicy` feature gate (disabled by default).
+	// This field is beta-level. To use this field, you must enable the
+	// `JobSuccessPolicy` feature gate (enabled by default).
 	// +optional
 	SuccessPolicy *SuccessPolicy
 
@@ -479,8 +477,8 @@ type JobSpec struct {
 	// characters as defined by RFC 3986. The value cannot exceed 63 characters.
 	// This field is immutable.
 	//
-	// This field is alpha-level. The job controller accepts setting the field
-	// when the feature gate JobManagedBy is enabled (disabled by default).
+	// This field is beta-level. The job controller accepts setting the field
+	// when the feature gate JobManagedBy is enabled (enabled by default).
 	// +optional
 	ManagedBy *string
 }
@@ -537,7 +535,8 @@ type JobStatus struct {
 	// +optional
 	Terminating *int32
 
-	// The number of active pods which have a Ready condition.
+	// The number of active pods which have a Ready condition and are not
+	// terminating (without a deletionTimestamp).
 	// +optional
 	Ready *int32
 

@@ -28,7 +28,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	policy "k8s.io/api/policy/v1"
-	resourcev1alpha2 "k8s.io/api/resource/v1alpha2"
+	resourceapi "k8s.io/api/resource/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -130,10 +130,9 @@ func StartScheduler(ctx context.Context, clientSet clientset.Interface, kubeConf
 
 func CreateResourceClaimController(ctx context.Context, tb ktesting.TB, clientSet clientset.Interface, informerFactory informers.SharedInformerFactory) func() {
 	podInformer := informerFactory.Core().V1().Pods()
-	schedulingInformer := informerFactory.Resource().V1alpha2().PodSchedulingContexts()
-	claimInformer := informerFactory.Resource().V1alpha2().ResourceClaims()
-	claimTemplateInformer := informerFactory.Resource().V1alpha2().ResourceClaimTemplates()
-	claimController, err := resourceclaim.NewController(klog.FromContext(ctx), clientSet, podInformer, schedulingInformer, claimInformer, claimTemplateInformer)
+	claimInformer := informerFactory.Resource().V1beta1().ResourceClaims()
+	claimTemplateInformer := informerFactory.Resource().V1beta1().ResourceClaimTemplates()
+	claimController, err := resourceclaim.NewController(klog.FromContext(ctx), true /* admin access */, clientSet, podInformer, claimInformer, claimTemplateInformer)
 	if err != nil {
 		tb.Fatalf("Error creating claim controller: %v", err)
 	}
@@ -219,7 +218,7 @@ func CreateGCController(ctx context.Context, tb ktesting.TB, restConfig restclie
 		go wait.Until(func() {
 			restMapper.Reset()
 		}, syncPeriod, ctx.Done())
-		go gc.Run(ctx, 1)
+		go gc.Run(ctx, 1, syncPeriod)
 		go gc.Sync(ctx, clientSet.Discovery(), syncPeriod)
 	}
 	return startGC
@@ -512,7 +511,7 @@ func InitTestAPIServer(t *testing.T, nsPrefix string, admission admission.Interf
 			options.Admission.GenericAdmission.DisablePlugins = []string{"ServiceAccount", "TaintNodesByCondition", "Priority", "StorageObjectInUseProtection"}
 			if utilfeature.DefaultFeatureGate.Enabled(features.DynamicResourceAllocation) {
 				options.APIEnablement.RuntimeConfig = cliflag.ConfigurationMap{
-					resourcev1alpha2.SchemeGroupVersion.String(): "true",
+					resourceapi.SchemeGroupVersion.String(): "true",
 				}
 			}
 		},
@@ -632,14 +631,14 @@ func InitTestSchedulerWithOptions(
 
 // WaitForPodToScheduleWithTimeout waits for a pod to get scheduled and returns
 // an error if it does not scheduled within the given timeout.
-func WaitForPodToScheduleWithTimeout(cs clientset.Interface, pod *v1.Pod, timeout time.Duration) error {
-	return wait.PollUntilContextTimeout(context.TODO(), 100*time.Millisecond, timeout, false, PodScheduled(cs, pod.Namespace, pod.Name))
+func WaitForPodToScheduleWithTimeout(ctx context.Context, cs clientset.Interface, pod *v1.Pod, timeout time.Duration) error {
+	return wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, timeout, false, PodScheduled(cs, pod.Namespace, pod.Name))
 }
 
 // WaitForPodToSchedule waits for a pod to get scheduled and returns an error if
 // it does not get scheduled within the timeout duration (30 seconds).
-func WaitForPodToSchedule(cs clientset.Interface, pod *v1.Pod) error {
-	return WaitForPodToScheduleWithTimeout(cs, pod, 30*time.Second)
+func WaitForPodToSchedule(ctx context.Context, cs clientset.Interface, pod *v1.Pod) error {
+	return WaitForPodToScheduleWithTimeout(ctx, cs, pod, 30*time.Second)
 }
 
 // PodScheduled checks if the pod has been scheduled
@@ -905,7 +904,7 @@ func RunPausePod(cs clientset.Interface, pod *v1.Pod) (*v1.Pod, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pause pod: %v", err)
 	}
-	if err = WaitForPodToSchedule(cs, pod); err != nil {
+	if err = WaitForPodToSchedule(context.TODO(), cs, pod); err != nil {
 		return pod, fmt.Errorf("Pod %v/%v didn't schedule successfully. Error: %v", pod.Namespace, pod.Name, err)
 	}
 	if pod, err = cs.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{}); err != nil {
@@ -942,7 +941,7 @@ func RunPodWithContainers(cs clientset.Interface, pod *v1.Pod) (*v1.Pod, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pod-with-containers: %v", err)
 	}
-	if err = WaitForPodToSchedule(cs, pod); err != nil {
+	if err = WaitForPodToSchedule(context.TODO(), cs, pod); err != nil {
 		return pod, fmt.Errorf("Pod %v didn't schedule successfully. Error: %v", pod.Name, err)
 	}
 	if pod, err = cs.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{}); err != nil {
@@ -1154,24 +1153,6 @@ func NextPodOrDie(t *testing.T, testCtx *TestContext) *schedulerframework.Queued
 		podInfo, _ = testCtx.Scheduler.NextPod(logger)
 	}); err != nil {
 		t.Fatalf("Timed out waiting for the Pod to be popped: %v", err)
-	}
-	return podInfo
-}
-
-// NextPod returns the next Pod in the scheduler queue, with a 5 seconds timeout.
-// Note that this function leaks goroutines in the case of timeout; even after this function returns after timeout,
-// the goroutine made by this function keep waiting to pop a pod from the queue.
-func NextPod(t *testing.T, testCtx *TestContext) *schedulerframework.QueuedPodInfo {
-	t.Helper()
-
-	var podInfo *schedulerframework.QueuedPodInfo
-	logger := klog.FromContext(testCtx.Ctx)
-	// NextPod() is a blocking operation. Wrap it in timeout() to avoid relying on
-	// default go testing timeout (10m) to abort.
-	if err := timeout(testCtx.Ctx, time.Second*5, func() {
-		podInfo, _ = testCtx.Scheduler.NextPod(logger)
-	}); err != nil {
-		return nil
 	}
 	return podInfo
 }

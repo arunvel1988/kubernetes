@@ -19,7 +19,7 @@ package state
 import (
 	"sync"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 )
 
@@ -32,20 +32,23 @@ type stateMemory struct {
 var _ State = &stateMemory{}
 
 // NewStateMemory creates new State to track resources allocated to pods
-func NewStateMemory() State {
+func NewStateMemory(alloc PodResourceAllocation) State {
+	if alloc == nil {
+		alloc = PodResourceAllocation{}
+	}
 	klog.V(2).InfoS("Initialized new in-memory state store for pod resource allocation tracking")
 	return &stateMemory{
-		podAllocation:   PodResourceAllocation{},
+		podAllocation:   alloc,
 		podResizeStatus: PodResizeStatus{},
 	}
 }
 
-func (s *stateMemory) GetContainerResourceAllocation(podUID string, containerName string) (v1.ResourceList, bool) {
+func (s *stateMemory) GetContainerResourceAllocation(podUID string, containerName string) (v1.ResourceRequirements, bool) {
 	s.RLock()
 	defer s.RUnlock()
 
 	alloc, ok := s.podAllocation[podUID][containerName]
-	return alloc.DeepCopy(), ok
+	return *alloc.DeepCopy(), ok
 }
 
 func (s *stateMemory) GetPodResourceAllocation() PodResourceAllocation {
@@ -54,30 +57,19 @@ func (s *stateMemory) GetPodResourceAllocation() PodResourceAllocation {
 	return s.podAllocation.Clone()
 }
 
-func (s *stateMemory) GetPodResizeStatus(podUID string) (v1.PodResizeStatus, bool) {
+func (s *stateMemory) GetPodResizeStatus(podUID string) v1.PodResizeStatus {
 	s.RLock()
 	defer s.RUnlock()
 
-	resizeStatus, ok := s.podResizeStatus[podUID]
-	return resizeStatus, ok
+	return s.podResizeStatus[podUID]
 }
 
-func (s *stateMemory) GetResizeStatus() PodResizeStatus {
-	s.RLock()
-	defer s.RUnlock()
-	prs := make(map[string]v1.PodResizeStatus)
-	for k, v := range s.podResizeStatus {
-		prs[k] = v
-	}
-	return prs
-}
-
-func (s *stateMemory) SetContainerResourceAllocation(podUID string, containerName string, alloc v1.ResourceList) error {
+func (s *stateMemory) SetContainerResourceAllocation(podUID string, containerName string, alloc v1.ResourceRequirements) error {
 	s.Lock()
 	defer s.Unlock()
 
 	if _, ok := s.podAllocation[podUID]; !ok {
-		s.podAllocation[podUID] = make(map[string]v1.ResourceList)
+		s.podAllocation[podUID] = make(map[string]v1.ResourceRequirements)
 	}
 
 	s.podAllocation[podUID][containerName] = alloc
@@ -85,16 +77,7 @@ func (s *stateMemory) SetContainerResourceAllocation(podUID string, containerNam
 	return nil
 }
 
-func (s *stateMemory) SetPodResourceAllocation(a PodResourceAllocation) error {
-	s.Lock()
-	defer s.Unlock()
-
-	s.podAllocation = a.Clone()
-	klog.V(3).InfoS("Updated pod resource allocation", "allocation", a)
-	return nil
-}
-
-func (s *stateMemory) SetPodResizeStatus(podUID string, resizeStatus v1.PodResizeStatus) error {
+func (s *stateMemory) SetPodResizeStatus(podUID string, resizeStatus v1.PodResizeStatus) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -104,19 +87,6 @@ func (s *stateMemory) SetPodResizeStatus(podUID string, resizeStatus v1.PodResiz
 		delete(s.podResizeStatus, podUID)
 	}
 	klog.V(3).InfoS("Updated pod resize state", "podUID", podUID, "resizeStatus", resizeStatus)
-	return nil
-}
-
-func (s *stateMemory) SetResizeStatus(rs PodResizeStatus) error {
-	s.Lock()
-	defer s.Unlock()
-	prs := make(map[string]v1.PodResizeStatus)
-	for k, v := range rs {
-		prs[k] = v
-	}
-	s.podResizeStatus = prs
-	klog.V(3).InfoS("Updated pod resize state", "resizes", rs)
-	return nil
 }
 
 func (s *stateMemory) deleteContainer(podUID string, containerName string) {
@@ -138,15 +108,5 @@ func (s *stateMemory) Delete(podUID string, containerName string) error {
 		return nil
 	}
 	s.deleteContainer(podUID, containerName)
-	return nil
-}
-
-func (s *stateMemory) ClearState() error {
-	s.Lock()
-	defer s.Unlock()
-
-	s.podAllocation = make(PodResourceAllocation)
-	s.podResizeStatus = make(PodResizeStatus)
-	klog.V(3).InfoS("Cleared state")
 	return nil
 }

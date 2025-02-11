@@ -56,6 +56,8 @@ const (
 	csiPodUnschedulableTimeout = 5 * time.Minute
 	csiResizeWaitPeriod        = 5 * time.Minute
 	csiVolumeAttachmentTimeout = 7 * time.Minute
+	// how long to wait for GetVolumeStats
+	csiNodeVolumeStatWaitPeriod = 2 * time.Minute
 	// how long to wait for Resizing Condition on PVC to appear
 	csiResizingConditionWait = 2 * time.Minute
 
@@ -94,8 +96,10 @@ type testParameters struct {
 	enableNodeExpansion bool   // enable node expansion for CSI mock driver
 	// just disable resizing on driver it overrides enableResizing flag for CSI mock driver
 	disableResizingOnDriver       bool
+	disableControllerExpansion    bool
 	enableSnapshot                bool
 	enableVolumeMountGroup        bool // enable the VOLUME_MOUNT_GROUP node capability in the CSI mock driver.
+	enableNodeVolumeCondition     bool
 	hooks                         *drivers.Hooks
 	tokenRequests                 []storagev1.TokenRequest
 	requiresRepublish             *bool
@@ -168,6 +172,8 @@ func (m *mockDriverSetup) init(ctx context.Context, tp testParameters) {
 		DisableAttach:                 tp.disableAttach,
 		EnableResizing:                tp.enableResizing,
 		EnableNodeExpansion:           tp.enableNodeExpansion,
+		EnableNodeVolumeCondition:     tp.enableNodeVolumeCondition,
+		DisableControllerExpansion:    tp.disableControllerExpansion,
 		EnableSnapshot:                tp.enableSnapshot,
 		EnableVolumeMountGroup:        tp.enableVolumeMountGroup,
 		TokenRequests:                 tp.tokenRequests,
@@ -459,7 +465,7 @@ func (m *mockDriverSetup) createPodWithFSGroup(ctx context.Context, fsGroup *int
 	return class, claim, pod
 }
 
-func (m *mockDriverSetup) createPodWithSELinux(ctx context.Context, accessModes []v1.PersistentVolumeAccessMode, mountOptions []string, seLinuxOpts *v1.SELinuxOptions) (*storagev1.StorageClass, *v1.PersistentVolumeClaim, *v1.Pod) {
+func (m *mockDriverSetup) createPodWithSELinux(ctx context.Context, accessModes []v1.PersistentVolumeAccessMode, mountOptions []string, seLinuxOpts *v1.SELinuxOptions, policy *v1.PodSELinuxChangePolicy) (*storagev1.StorageClass, *v1.PersistentVolumeClaim, *v1.Pod) {
 	ginkgo.By("Creating pod with SELinux context")
 	f := m.f
 	nodeSelection := m.config.ClientNodeSelection
@@ -476,7 +482,7 @@ func (m *mockDriverSetup) createPodWithSELinux(ctx context.Context, accessModes 
 		ReclaimPolicy:        m.tp.reclaimPolicy,
 	}
 	class, claim := createClaim(ctx, f.ClientSet, scTest, nodeSelection, m.tp.scName, f.Namespace.Name, accessModes)
-	pod, err := startPausePodWithSELinuxOptions(f.ClientSet, claim, nodeSelection, f.Namespace.Name, seLinuxOpts)
+	pod, err := startPausePodWithSELinuxOptions(f.ClientSet, claim, nodeSelection, f.Namespace.Name, seLinuxOpts, policy)
 	framework.ExpectNoError(err, "Failed to create pause pod with SELinux context %s: %v", seLinuxOpts, err)
 
 	if class != nil {
@@ -578,7 +584,7 @@ func getStorageClass(
 
 func getDefaultPluginName() string {
 	switch {
-	case framework.ProviderIs("gke"), framework.ProviderIs("gce"):
+	case framework.ProviderIs("gce"):
 		return "kubernetes.io/gce-pd"
 	case framework.ProviderIs("aws"):
 		return "kubernetes.io/aws-ebs"
@@ -798,14 +804,15 @@ func startBusyBoxPodWithVolumeSource(cs clientset.Interface, volumeSource v1.Vol
 	return cs.CoreV1().Pods(ns).Create(context.TODO(), pod, metav1.CreateOptions{})
 }
 
-func startPausePodWithSELinuxOptions(cs clientset.Interface, pvc *v1.PersistentVolumeClaim, node e2epod.NodeSelection, ns string, seLinuxOpts *v1.SELinuxOptions) (*v1.Pod, error) {
+func startPausePodWithSELinuxOptions(cs clientset.Interface, pvc *v1.PersistentVolumeClaim, node e2epod.NodeSelection, ns string, seLinuxOpts *v1.SELinuxOptions, policy *v1.PodSELinuxChangePolicy) (*v1.Pod, error) {
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "pvc-volume-tester-",
 		},
 		Spec: v1.PodSpec{
 			SecurityContext: &v1.PodSecurityContext{
-				SELinuxOptions: seLinuxOpts,
+				SELinuxOptions:      seLinuxOpts,
+				SELinuxChangePolicy: policy,
 			},
 			Containers: []v1.Container{
 				{

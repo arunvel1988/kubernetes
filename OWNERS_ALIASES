@@ -35,11 +35,12 @@ aliases:
     - enj
     - liggitt
     - mikedanese
-    - ncdc
     - smarterclayton
     - sttts
     - thockin
     - wojtek-t
+  # - emeritus
+  # - ncdc
   sig-auth-certificates-approvers:
     - liggitt
     - mikedanese
@@ -93,6 +94,7 @@ aliases:
     - puerco # SIG Technical Lead / RelEng subproject owner / Release Manager
     - saschagrunert # SIG Chair / RelEng subproject owner / Release Manager
     - Verolop # SIG Technical Lead / RelEng subproject owner / Release Manager
+    - xmudrii # RelEng subproject lead / Release Manager
   release-managers:
     - cpanato
     - jeremyrickard
@@ -102,6 +104,9 @@ aliases:
     - saschagrunert
     - Verolop
     - xmudrii
+  release-team-subproject-leads:
+    - gracenng # Release Team subproject lead
+    - katcosgrove # Release Team subproject lead
   build-image-approvers:
     - BenTheElder
     - cblecker
@@ -113,7 +118,7 @@ aliases:
     - puerco # SIG Technical Lead / RelEng subproject owner / Release Manager
     - saschagrunert # SIG Chair / RelEng subproject owner / Release Manager
     - Verolop # SIG Technical Lead / RelEng subproject owner / Release Manager
-    - xmudrii # Release Manager
+    - xmudrii # RelEng subproject lead / Release Manager
   build-image-reviewers:
     - BenTheElder
     - cblecker
@@ -125,7 +130,7 @@ aliases:
     - puerco # SIG Technical Lead / RelEng subproject owner / Release Manager
     - saschagrunert # SIG Chair / RelEng subproject owner / Release Manager
     - Verolop # SIG Technical Lead / RelEng subproject owner / Release Manager
-    - xmudrii # Release Manager
+    - xmudrii # RelEng subproject lead / Release Manager
   sig-storage-approvers:
     - gnufied
     - jsafrane
@@ -137,7 +142,6 @@ aliases:
   # - rootfs
   sig-storage-reviewers:
     - carlory
-    - chrishenzie
     - gnufied
     - humblec
     - jsafrane
@@ -148,15 +152,17 @@ aliases:
     - saikat-royc
     - xing-yang
   # emeritus:
+  # - chrishenzie
   # - davidz627
   # - Jiawei0227
   # - rootfs
   # - verult
   sig-scheduling-maintainers:
     - alculquicondor
-    - Huang-Wei
     - ahg-g
+    - Huang-Wei
     - kerthcet
+    - macsko
     - sanposhiho
   # emeritus:
   # - damemi
@@ -165,9 +171,11 @@ aliases:
   # - ravisantoshgudimetla
   # - wojtek-t
   sig-scheduling:
-    - chendave
+    - AxeZhan
     - damemi
     - denkensk
+    - dom4ha
+    - macsko
     - sanposhiho
     - kerthcet
   # emeritus:
@@ -177,6 +185,7 @@ aliases:
   # - hex108
   # - resouer
   # - wgliang
+  # - chendave
 
   sig-cli-maintainers:
     - ardaguclu
@@ -216,6 +225,8 @@ aliases:
     - sjenning
     - mrunalp
     - klueska
+    - SergeyKanzhelev
+    - tallclair
   # emeretus:
   # - dashpole
   # - vishh
@@ -252,6 +263,7 @@ aliases:
     - rphillips
     - kannon92
     - ffromani
+    - tallclair
   sig-network-approvers:
     - andrewsykim
     - aojea
@@ -285,11 +297,11 @@ aliases:
     - smarterclayton
     - atiratree
   sig-apps-reviewers:
-    - alculquicondor
     - atiratree
     - janetkuo
     - kow3ns
     - krmayankk
+    - mimowo
     - mortent
     - smarterclayton
     - soltysh
@@ -297,20 +309,18 @@ aliases:
   # - tnozicka
 
   sig-autoscaling-maintainers:
-    - bskiba
+    - gjtempleton
     - MaciekPytel
-    - mwielgus
   sig-instrumentation-approvers:
     - logicalhan
     - dashpole
-    - ehashman
     - RainbowMango
     - serathius
     - dgrisonnet
     - rexagod
+    - richabanker
   sig-instrumentation-reviewers:
     - dashpole
-    - ehashman
     - s-urbaniak
     - coffeepac
     - logicalhan
@@ -320,9 +330,11 @@ aliases:
     - pohly
     - mengjiao-liu
     - rexagod
+    - richabanker
   # sig-instrumentation-emeritus
   # - brancz
   # - DirectXMan12
+  # - ehashman
 
   api-approvers:
     - deads2k
@@ -404,13 +416,14 @@ aliases:
     - janetkuo
     - justinsb
     - pwittrock
-    - ncdc
     - tallclair
     - mwielgus
     - soltysh
     - jsafrane
     - dims
     - cici37
+  # - emeritus
+  # - ncdc
   # api-reviewers targeted by sig area
   # see https://git.k8s.io/community/sig-architecture/api-review-process.md#training-reviews
   sig-api-machinery-api-reviewers:
@@ -423,7 +436,6 @@ aliases:
     - janetkuo
     - kow3ns
     - soltysh
-    - alculquicondor
   sig-auth-api-reviewers:
     - enj
     - mikedanese
@@ -431,7 +443,7 @@ aliases:
     - pwittrock
     - soltysh
   sig-cloud-provider-api-reviewers:
-    - andrewsykim
+    - elmiko
     - cheftako
     - dims
   # sig-cluster-lifecycle-api-reviewers:
@@ -497,13 +509,15 @@ aliases:
     - ardaguclu # CLI
     - aojea # Network, Testing
     - danwinship # Network
+    - dashpole # Instrumentation
     - dchen1107 # Node
     - deads2k # API Machinery
     - derekwaynecarr # Node
+    - dgrisonnet # Instrumentation
     - dims # Architecture
     - eddiezane # CLI
-    - ehashman # Instrumentation
     - enj # Auth
+    - gjtempleton # Autoscaling
     - janetkuo # Apps
     - jayunit100 # Windows
     - jpbetz # API Machinery
@@ -514,12 +528,13 @@ aliases:
     - liggitt # Auth
     - logicalhan # Instrumentation
     - luxas # Cluster Lifecycle
+    - maciekpytel # Autoscaling
     - marosset # Windows
     - mikezappa87 # Network
     - mrunalp # Node
     - msau42 # Storage
-    - mwielgus # Autoscaling
     - rexagod # Instrumentation
+    - richabanker # Instrumentation
     - saad-ali # Storage
     - sergeykanzhelev # Node
     - shaneutt # Network

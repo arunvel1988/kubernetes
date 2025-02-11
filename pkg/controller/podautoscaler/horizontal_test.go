@@ -54,7 +54,7 @@ import (
 	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
 	cmfake "k8s.io/metrics/pkg/client/custom_metrics/fake"
 	emfake "k8s.io/metrics/pkg/client/external_metrics/fake"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	"github.com/stretchr/testify/assert"
 
@@ -82,7 +82,7 @@ func statusOkWithOverrides(overrides ...autoscalingv2.HorizontalPodAutoscalerCon
 	resv2 := make([]autoscalingv2.HorizontalPodAutoscalerCondition, len(statusOk))
 	copy(resv2, statusOk)
 	for _, override := range overrides {
-		resv2 = setConditionInList(resv2, override.Type, override.Status, override.Reason, override.Message)
+		resv2 = setConditionInList(resv2, override.Type, override.Status, override.Reason, "%s", override.Message)
 	}
 
 	// copy to a v1 slice
@@ -675,7 +675,7 @@ func findCpuUtilization(metricStatus []autoscalingv2.MetricStatus) (utilization 
 	return nil
 }
 
-func (tc *testCase) verifyResults(t *testing.T, m *mockMonitor) {
+func (tc *testCase) verifyResults(ctx context.Context, t *testing.T, m *mockMonitor) {
 	tc.Lock()
 	defer tc.Unlock()
 
@@ -685,12 +685,12 @@ func (tc *testCase) verifyResults(t *testing.T, m *mockMonitor) {
 		assert.Equal(t, tc.specReplicas != tc.expectedDesiredReplicas, tc.eventCreated, "an event should have been created only if we expected a change in replicas")
 	}
 
-	tc.verifyRecordedMetric(t, m)
+	tc.verifyRecordedMetric(ctx, t, m)
 }
 
-func (tc *testCase) verifyRecordedMetric(t *testing.T, m *mockMonitor) {
+func (tc *testCase) verifyRecordedMetric(ctx context.Context, t *testing.T, m *mockMonitor) {
 	// First, wait for the reconciliation completed at least once.
-	m.waitUntilRecorded(t)
+	m.waitUntilRecorded(ctx, t)
 
 	assert.Equal(t, tc.expectedReportedReconciliationActionLabel, m.reconciliationActionLabels[0], "the reconciliation action should be recorded in monitor expectedly")
 	assert.Equal(t, tc.expectedReportedReconciliationErrorLabel, m.reconciliationErrorLabels[0], "the reconciliation error should be recorded in monitor expectedly")
@@ -757,7 +757,7 @@ func (tc *testCase) setupController(t *testing.T) (*HorizontalController, inform
 					tc.expectedDesiredReplicas,
 					(int64(tc.reportedLevels[0])*100)/tc.reportedCPURequests[0].MilliValue(), tc.specReplicas), obj.Message)
 			default:
-				assert.False(t, true, fmt.Sprintf("Unexpected event: %s / %s", obj.Reason, obj.Message))
+				assert.False(t, true, "Unexpected event: %s / %s", obj.Reason, obj.Message)
 			}
 		}
 		tc.eventCreated = true
@@ -833,7 +833,7 @@ func (tc *testCase) runTestWithController(t *testing.T, hpaController *Horizonta
 	if !ok {
 		t.Fatalf("test HPA controller should have mockMonitor, but actually not")
 	}
-	tc.verifyResults(t, m)
+	tc.verifyResults(ctx, t, m)
 }
 
 func (tc *testCase) runTest(t *testing.T) {
@@ -875,8 +875,8 @@ func (m *mockMonitor) ObserveMetricComputationResult(action monitor.ActionLabel,
 }
 
 // waitUntilRecorded waits for the HPA controller to reconcile at least once.
-func (m *mockMonitor) waitUntilRecorded(t *testing.T) {
-	if err := wait.Poll(20*time.Millisecond, 100*time.Millisecond, func() (done bool, err error) {
+func (m *mockMonitor) waitUntilRecorded(ctx context.Context, t *testing.T) {
+	if err := wait.PollUntilContextTimeout(ctx, 20*time.Millisecond, 100*time.Millisecond, true, func(ctx context.Context) (done bool, err error) {
 		m.RWMutex.RLock()
 		defer m.RWMutex.RUnlock()
 		if len(m.reconciliationActionLabels) == 0 || len(m.reconciliationErrorLabels) == 0 {
@@ -925,7 +925,7 @@ func TestScaleUpContainer(t *testing.T) {
 				Name: v1.ResourceCPU,
 				Target: autoscalingv2.MetricTarget{
 					Type:               autoscalingv2.UtilizationMetricType,
-					AverageUtilization: pointer.Int32(30),
+					AverageUtilization: ptr.To(int32(30)),
 				},
 				Container: "container1",
 			},
@@ -1619,7 +1619,7 @@ func TestScaleDownContainerResource(t *testing.T) {
 				Name:      v1.ResourceCPU,
 				Target: autoscalingv2.MetricTarget{
 					Type:               autoscalingv2.UtilizationMetricType,
-					AverageUtilization: pointer.Int32(50),
+					AverageUtilization: ptr.To(int32(50)),
 				},
 			},
 		}},
@@ -3848,7 +3848,7 @@ func TestCalculateScaleUpLimitWithScalingRules(t *testing.T) {
 	policy := autoscalingv2.MinChangePolicySelect
 
 	calculated := calculateScaleUpLimitWithScalingRules(1, []timestampedScaleEvent{}, []timestampedScaleEvent{}, &autoscalingv2.HPAScalingRules{
-		StabilizationWindowSeconds: pointer.Int32(300),
+		StabilizationWindowSeconds: ptr.To(int32(300)),
 		SelectPolicy:               &policy,
 		Policies: []autoscalingv2.HPAScalingPolicy{
 			{
@@ -3863,14 +3863,14 @@ func TestCalculateScaleUpLimitWithScalingRules(t *testing.T) {
 			},
 		},
 	})
-	assert.Equal(t, calculated, int32(2))
+	assert.Equal(t, int32(2), calculated)
 }
 
 func TestCalculateScaleDownLimitWithBehaviors(t *testing.T) {
 	policy := autoscalingv2.MinChangePolicySelect
 
 	calculated := calculateScaleDownLimitWithBehaviors(5, []timestampedScaleEvent{}, []timestampedScaleEvent{}, &autoscalingv2.HPAScalingRules{
-		StabilizationWindowSeconds: pointer.Int32(300),
+		StabilizationWindowSeconds: ptr.To(int32(300)),
 		SelectPolicy:               &policy,
 		Policies: []autoscalingv2.HPAScalingPolicy{
 			{
@@ -3885,13 +3885,13 @@ func TestCalculateScaleDownLimitWithBehaviors(t *testing.T) {
 			},
 		},
 	})
-	assert.Equal(t, calculated, int32(3))
+	assert.Equal(t, int32(3), calculated)
 }
 
 func generateScalingRules(pods, podsPeriod, percent, percentPeriod, stabilizationWindow int32) *autoscalingv2.HPAScalingRules {
 	policy := autoscalingv2.MaxChangePolicySelect
 	directionBehavior := autoscalingv2.HPAScalingRules{
-		StabilizationWindowSeconds: pointer.Int32(stabilizationWindow),
+		StabilizationWindowSeconds: ptr.To(int32(stabilizationWindow)),
 		SelectPolicy:               &policy,
 	}
 	if pods != 0 {
@@ -5293,5 +5293,5 @@ func TestMultipleHPAs(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, hpaCount, len(processedHPA), "Expected to process all HPAs")
+	assert.Len(t, processedHPA, hpaCount, "Expected to process all HPAs")
 }

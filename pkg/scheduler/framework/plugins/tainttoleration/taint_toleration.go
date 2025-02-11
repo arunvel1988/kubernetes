@@ -25,6 +25,7 @@ import (
 	v1helper "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/feature"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
 	"k8s.io/kubernetes/pkg/scheduler/util"
@@ -32,7 +33,8 @@ import (
 
 // TaintToleration is a plugin that checks if a pod tolerates a node's taints.
 type TaintToleration struct {
-	handle framework.Handle
+	handle                    framework.Handle
+	enableSchedulingQueueHint bool
 }
 
 var _ framework.FilterPlugin = &TaintToleration{}
@@ -56,10 +58,27 @@ func (pl *TaintToleration) Name() string {
 
 // EventsToRegister returns the possible events that may make a Pod
 // failed by this plugin schedulable.
-func (pl *TaintToleration) EventsToRegister() []framework.ClusterEventWithHint {
-	return []framework.ClusterEventWithHint{
-		{Event: framework.ClusterEvent{Resource: framework.Node, ActionType: framework.Add | framework.Update}, QueueingHintFn: pl.isSchedulableAfterNodeChange},
+func (pl *TaintToleration) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
+	if pl.enableSchedulingQueueHint {
+		return []framework.ClusterEventWithHint{
+			// When the QueueingHint feature is enabled, preCheck is eliminated and we don't need additional UpdateNodeLabel.
+			{Event: framework.ClusterEvent{Resource: framework.Node, ActionType: framework.Add | framework.UpdateNodeTaint}, QueueingHintFn: pl.isSchedulableAfterNodeChange},
+			// When the QueueingHint feature is enabled,
+			// the scheduling queue uses Pod/Update Queueing Hint
+			// to determine whether a Pod's update makes the Pod schedulable or not.
+			// https://github.com/kubernetes/kubernetes/pull/122234
+			{Event: framework.ClusterEvent{Resource: framework.Pod, ActionType: framework.UpdatePodToleration}, QueueingHintFn: pl.isSchedulableAfterPodTolerationChange},
+		}, nil
 	}
+
+	return []framework.ClusterEventWithHint{
+		// A note about UpdateNodeLabel event:
+		// Ideally, it's supposed to register only Add | UpdateNodeTaint because UpdateNodeLabel will never change the result from this plugin.
+		// But, we may miss Node/Add event due to preCheck, and we decided to register UpdateNodeTaint | UpdateNodeLabel for all plugins registering Node/Add.
+		// See: https://github.com/kubernetes/kubernetes/issues/109437
+		{Event: framework.ClusterEvent{Resource: framework.Node, ActionType: framework.Add | framework.UpdateNodeTaint | framework.UpdateNodeLabel}, QueueingHintFn: pl.isSchedulableAfterNodeChange},
+		// No need to register the Pod event; the update to the unschedulable Pods already triggers the scheduling retry when QHint is disabled.
+	}, nil
 }
 
 // isSchedulableAfterNodeChange is invoked for all node events reported by
@@ -191,6 +210,27 @@ func (pl *TaintToleration) ScoreExtensions() framework.ScoreExtensions {
 }
 
 // New initializes a new plugin and returns it.
-func New(_ context.Context, _ runtime.Object, h framework.Handle) (framework.Plugin, error) {
-	return &TaintToleration{handle: h}, nil
+func New(_ context.Context, _ runtime.Object, h framework.Handle, fts feature.Features) (framework.Plugin, error) {
+	return &TaintToleration{
+		handle:                    h,
+		enableSchedulingQueueHint: fts.EnableSchedulingQueueHint,
+	}, nil
+}
+
+// isSchedulableAfterPodTolerationChange is invoked whenever a pod's toleration changed.
+func (pl *TaintToleration) isSchedulableAfterPodTolerationChange(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (framework.QueueingHint, error) {
+	_, modifiedPod, err := util.As[*v1.Pod](oldObj, newObj)
+	if err != nil {
+		return framework.Queue, err
+	}
+
+	if pod.UID == modifiedPod.UID {
+		// The updated Pod is the unschedulable Pod.
+		logger.V(5).Info("a new toleration is added for the unschedulable Pod, and it may make it schedulable", "pod", klog.KObj(modifiedPod))
+		return framework.Queue, nil
+	}
+
+	logger.V(5).Info("a new toleration is added for a Pod, but it's an unrelated Pod and wouldn't change the TaintToleration plugin's decision", "pod", klog.KObj(modifiedPod))
+
+	return framework.QueueSkip, nil
 }

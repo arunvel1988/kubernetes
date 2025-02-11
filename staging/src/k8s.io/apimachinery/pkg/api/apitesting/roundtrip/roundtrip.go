@@ -24,9 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	//nolint:staticcheck //iccheck // SA1019 Keep using deprecated module; it still seems to be maintained and the api of the recommended replacement differs
-	"github.com/golang/protobuf/proto"
-	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp" //nolint:depguard
 	fuzz "github.com/google/gofuzz"
 	flag "github.com/spf13/pflag"
 
@@ -279,7 +277,7 @@ func roundTripOfExternalType(t *testing.T, scheme *runtime.Scheme, codecFactory 
 	typeAcc.SetKind(externalGVK.Kind)
 	typeAcc.SetAPIVersion(externalGVK.GroupVersion().String())
 
-	roundTrip(t, scheme, json.NewSerializer(json.DefaultMetaFactory, scheme, scheme, false), object)
+	roundTrip(t, scheme, json.NewSerializerWithOptions(json.DefaultMetaFactory, scheme, scheme, json.SerializerOptions{}), object)
 
 	// TODO remove this hack after we're past the intermediate steps
 	if !skipProtobuf {
@@ -350,14 +348,14 @@ func roundTrip(t *testing.T, scheme *runtime.Scheme, codec runtime.Codec, object
 	// decode (deserialize) the encoded data back into an object
 	obj2, err := runtime.Decode(codec, data)
 	if err != nil {
-		t.Errorf("%v: %v\nCodec: %#v\nData: %s\nSource: %#v", name, err, codec, dataAsString(data), dump.Pretty(object))
+		t.Errorf("%v: %v\nCodec: %#v\nData: %s\nSource: %s", name, err, codec, dataAsString(data), dump.Pretty(object))
 		panic("failed")
 	}
 
 	// ensure that the object produced from decoding the encoded data is equal
 	// to the original object
 	if !apiequality.Semantic.DeepEqual(original, obj2) {
-		t.Errorf("%v: diff: %v\nCodec: %#v\nSource:\n\n%#v\n\nEncoded:\n\n%s\n\nFinal:\n\n%#v", name, cmp.Diff(original, obj2), codec, dump.Pretty(original), dataAsString(data), dump.Pretty(obj2))
+		t.Errorf("%v: diff: %v\nCodec: %#v\nSource:\n\n%s\n\nEncoded:\n\n%s\n\nFinal:\n\n%s", name, cmp.Diff(original, obj2), codec, dump.Pretty(original), dataAsString(data), dump.Pretty(obj2))
 		return
 	}
 
@@ -431,7 +429,6 @@ func dataAsString(data []byte) string {
 	dataString := string(data)
 	if !strings.HasPrefix(dataString, "{") {
 		dataString = "\n" + hex.Dump(data)
-		proto.NewBuffer(make([]byte, 0, 1024)).DebugPrint("decoded object", data)
 	}
 	return dataString
 }

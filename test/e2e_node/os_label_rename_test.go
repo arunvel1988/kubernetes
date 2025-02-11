@@ -49,7 +49,7 @@ var _ = SIGDescribe("OSArchLabelReconciliation", framework.WithSerial(), framewo
 
 			ginkgo.By("killing and restarting kubelet")
 			// Let's kill the kubelet
-			startKubelet := stopKubelet()
+			restartKubelet := mustStopKubelet(ctx, f)
 			// Update labels
 			newNode := node.DeepCopy()
 			newNode.Labels[v1.LabelOSStable] = "dummyOS"
@@ -57,7 +57,7 @@ var _ = SIGDescribe("OSArchLabelReconciliation", framework.WithSerial(), framewo
 			_, _, err := nodeutil.PatchNodeStatus(f.ClientSet.CoreV1(), types.NodeName(node.Name), node, newNode)
 			framework.ExpectNoError(err)
 			// Restart kubelet
-			startKubelet()
+			restartKubelet(ctx)
 			framework.ExpectNoError(e2enode.WaitForAllNodesSchedulable(ctx, f.ClientSet, framework.RestartNodeReadyAgainTimeout))
 			// If this happens right, node should have all the labels reset properly
 			err = waitForNodeLabels(ctx, f.ClientSet.CoreV1(), node.Name, 5*time.Minute)
@@ -85,7 +85,7 @@ var _ = SIGDescribe("OSArchLabelReconciliation", framework.WithSerial(), framewo
 func waitForNodeLabels(ctx context.Context, c v1core.CoreV1Interface, nodeName string, timeout time.Duration) error {
 	ginkgo.By(fmt.Sprintf("Waiting for node %v to have appropriate labels", nodeName))
 	// Poll until the node has desired labels
-	return wait.PollWithContext(ctx, framework.Poll, timeout,
+	return wait.PollUntilContextTimeout(ctx, framework.Poll, timeout, false,
 		func(ctx context.Context) (bool, error) {
 			node, err := c.Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 			if err != nil {

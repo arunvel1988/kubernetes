@@ -119,8 +119,18 @@ func (o containerOutputList) String() string {
 	return b.String()
 }
 
-// RunTogether returns an error the lhs and rhs run together
+// RunTogether returns an error if containers don't run together
 func (o containerOutputList) RunTogether(lhs, rhs string) error {
+	if err := o.RunTogetherLhsFirst(lhs, rhs); err != nil {
+		if err := o.RunTogetherLhsFirst(rhs, lhs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RunTogetherLhsFirst returns an error if containers don't run together or if rhs starts before lhs
+func (o containerOutputList) RunTogetherLhsFirst(lhs, rhs string) error {
 	lhsStart := o.findIndex(lhs, "Started", 0)
 	if lhsStart == -1 {
 		return fmt.Errorf("couldn't find that %s ever started, got\n%v", lhs, o)
@@ -166,24 +176,6 @@ func (o containerOutputList) StartsBefore(lhs, rhs string) error {
 	if rhsStart == -1 {
 		return fmt.Errorf("couldn't find that %s started after %s, got\n%v", rhs, lhs, o)
 	}
-	return nil
-}
-
-// DoesntStartAfter returns an error if lhs started after rhs
-func (o containerOutputList) DoesntStartAfter(lhs, rhs string) error {
-	rhsStart := o.findIndex(rhs, "Starting", 0)
-
-	if rhsStart == -1 {
-		return fmt.Errorf("couldn't find that %s ever started, got\n%v", rhs, o)
-	}
-
-	// this works even for the same names (restart case)
-	lhsStart := o.findIndex(lhs, "Started", rhsStart+1)
-
-	if lhsStart != -1 {
-		return fmt.Errorf("expected %s to not start after %s, got\n%v", lhs, rhs, o)
-	}
-
 	return nil
 }
 
@@ -341,12 +333,13 @@ func parseOutput(ctx context.Context, f *framework.Framework, pod *v1.Pod) conta
 	sc := bufio.NewScanner(&buf)
 	var res containerOutputList
 	for sc.Scan() {
+		log := sc.Text()
 		fields := strings.Fields(sc.Text())
 		if len(fields) < 3 {
 			framework.ExpectNoError(fmt.Errorf("%v should have at least length 3", fields))
 		}
 		timestamp, err := time.Parse(time.RFC3339, fields[0])
-		framework.ExpectNoError(err)
+		framework.ExpectNoError(err, "Failed to parse the timestamp, log: %q", log)
 		res = append(res, containerOutput{
 			timestamp:     timestamp,
 			containerName: fields[1],

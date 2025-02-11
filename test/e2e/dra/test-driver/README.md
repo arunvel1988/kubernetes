@@ -55,22 +55,18 @@ kubelet<->dynamic resource allocation plugin interaction.
 
 To try out the feature, build Kubernetes, then in one console run:
 ```console
-RUNTIME_CONFIG="resource.k8s.io/v1alpha2" FEATURE_GATES=DynamicResourceAllocation=true ALLOW_PRIVILEGED=1 ./hack/local-up-cluster.sh -O
+RUNTIME_CONFIG="resource.k8s.io/v1alpha3" FEATURE_GATES=DynamicResourceAllocation=true ALLOW_PRIVILEGED=1 ./hack/local-up-cluster.sh -O
 ```
 
 In another:
-```console
-go run ./test/e2e/dra/test-driver --feature-gates ContextualLogging=true -v=5 controller
 ```
-
-In yet another:
-```console
 sudo mkdir -p /var/run/cdi && sudo chmod a+rwx /var/run/cdi /var/lib/kubelet/plugins_registry
-go run ./test/e2e/dra/test-driver --feature-gates ContextualLogging=true -v=5 kubelet-plugin
+KUBECONFIG=/var/run/kubernetes/admin.kubeconfig go run ./test/e2e/dra/test-driver -v=5 kubelet-plugin --node-name=127.0.0.1
 ```
 
 And finally:
 ```console
+$ export KUBECONFIG=/var/run/kubernetes/admin.kubeconfig
 $ kubectl create -f test/e2e/dra/test-driver/deploy/example/resourceclass.yaml
 resourceclass/example created
 $ kubectl create -f test/e2e/dra/test-driver/deploy/example/pod-inline.yaml
@@ -78,8 +74,8 @@ configmap/pause-claim-parameters created
 pod/pause created
 
 $ kubectl get resourceclaims
-NAME             CLASSNAME   ALLOCATIONMODE         STATE                AGE
-pause-resource   example     WaitForFirstConsumer   allocated,reserved   19s
+NAME             CLASSNAME   STATE                AGE
+pause-resource   example     allocated,reserved   19s
 
 $ kubectl get pods
 NAME    READY   STATUS    RESTARTS   AGE

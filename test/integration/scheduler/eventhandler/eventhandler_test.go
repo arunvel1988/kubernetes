@@ -56,10 +56,10 @@ func (pl *fooPlugin) Filter(ctx context.Context, state *framework.CycleState, po
 	return framework.NewStatus(framework.Unschedulable)
 }
 
-func (pl *fooPlugin) EventsToRegister() []framework.ClusterEventWithHint {
+func (pl *fooPlugin) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
 	return []framework.ClusterEventWithHint{
 		{Event: framework.ClusterEvent{Resource: framework.Node, ActionType: framework.UpdateNodeTaint}},
-	}
+	}, nil
 }
 
 // newPlugin returns a plugin factory with specified Plugin.
@@ -98,7 +98,7 @@ func TestUpdateNodeEvent(t *testing.T) {
 		}},
 	})
 
-	testCtx, teardown := schedulerutils.InitTestSchedulerForFrameworkTest(t, testContext, 0,
+	testCtx, teardown := schedulerutils.InitTestSchedulerForFrameworkTest(t, testContext, 0, true,
 		scheduler.WithProfiles(cfg.Profiles...),
 		scheduler.WithFrameworkOutOfTreeRegistry(registry),
 	)
@@ -131,7 +131,7 @@ func TestUpdateNodeEvent(t *testing.T) {
 		t.Fatalf("Error updating the node: %v", err)
 	}
 
-	if err := testutils.WaitForPodToSchedule(testCtx.ClientSet, pod); err != nil {
+	if err := testutils.WaitForPodToSchedule(testCtx.Ctx, testCtx.ClientSet, pod); err != nil {
 		t.Errorf("Pod %v was not scheduled: %v", pod.Name, err)
 	}
 }

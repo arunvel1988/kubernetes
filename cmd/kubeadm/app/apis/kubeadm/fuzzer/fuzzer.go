@@ -89,13 +89,11 @@ func fuzzClusterConfiguration(obj *kubeadm.ClusterConfiguration, c fuzz.Continue
 	obj.CIImageRepository = "" // This fields doesn't exists in public API >> using default to get the roundtrip test pass
 	obj.KubernetesVersion = "qux"
 	obj.CIKubernetesVersion = "" // This fields doesn't exists in public API >> using default to get the roundtrip test pass
-	obj.APIServer.TimeoutForControlPlane = &metav1.Duration{
-		Duration: 0,
-	}
-	obj.ControllerManager.ExtraEnvs = []kubeadm.EnvVar{}
-	obj.APIServer.ExtraEnvs = []kubeadm.EnvVar{}
-	obj.Scheduler.ExtraEnvs = []kubeadm.EnvVar{}
-	obj.Etcd.Local.ExtraEnvs = []kubeadm.EnvVar{}
+	obj.APIServer.TimeoutForControlPlane = &metav1.Duration{}
+	obj.ControllerManager.ExtraEnvs = nil
+	obj.APIServer.ExtraEnvs = nil
+	obj.Scheduler.ExtraEnvs = nil
+	obj.Etcd.Local.ExtraEnvs = nil
 	obj.EncryptionAlgorithm = kubeadm.EncryptionAlgorithmRSA2048
 	obj.Proxy.Disabled = false
 	obj.CertificateValidityPeriod = &metav1.Duration{Duration: constants.CertificateValidityPeriod}
@@ -135,7 +133,7 @@ func fuzzJoinConfiguration(obj *kubeadm.JoinConfiguration, c fuzz.Continue) {
 	obj.Discovery = kubeadm.Discovery{
 		BootstrapToken:    &kubeadm.BootstrapTokenDiscovery{Token: "baz"},
 		TLSBootstrapToken: "qux",
-		Timeout:           &metav1.Duration{},
+		Timeout:           &metav1.Duration{Duration: constants.DiscoveryTimeout},
 	}
 	obj.SkipPhases = nil
 	obj.NodeRegistration.ImagePullPolicy = corev1.PullIfNotPresent
@@ -170,6 +168,8 @@ func fuzzUpgradeConfiguration(obj *kubeadm.UpgradeConfiguration, c fuzz.Continue
 	obj.Apply.CertificateRenewal = ptr.To(false)
 	obj.Apply.ImagePullPolicy = corev1.PullIfNotPresent
 	obj.Apply.ImagePullSerial = ptr.To(true)
+
+	obj.Plan.EtcdUpgrade = ptr.To(true)
 
 	kubeadm.SetDefaultTimeouts(&obj.Timeouts)
 }

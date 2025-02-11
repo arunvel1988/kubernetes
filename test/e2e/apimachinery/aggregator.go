@@ -28,6 +28,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -131,6 +132,12 @@ func generateSampleAPIServerObjectNames(namespace string) sampleAPIServerObjectN
 	}
 }
 
+// SetUpSampleAPIServer sets up a sample-apiserver.
+//
+// Important:
+// Test cases that call this function should be marked as serial due to potential conflicts
+// with other test cases that also set up a sample-apiserver. For more information, see
+// https://github.com/kubernetes/kubernetes/issues/119582#issuecomment-2215054411.
 func SetUpSampleAPIServer(ctx context.Context, f *framework.Framework, aggrclient *aggregatorclient.Clientset, image string, n sampleAPIServerObjectNames, apiServiceGroupName, apiServiceVersion string) {
 	ginkgo.By("Registering the sample API server.")
 	client := f.ClientSet
@@ -547,13 +554,13 @@ func TestSampleAPIServer(ctx context.Context, f *framework.Framework, aggrclient
 	locatedWardle := false
 	for _, item := range list.Items {
 		if item.Name == apiServiceName {
-			framework.Logf("Found " + apiServiceName + " in APIServiceList")
+			framework.Logf("Found %s in APIServiceList", apiServiceName)
 			locatedWardle = true
 			break
 		}
 	}
 	if !locatedWardle {
-		framework.Failf("Unable to find " + apiServiceName + " in APIServiceList")
+		framework.Failf("Unable to find %s in APIServiceList", apiServiceName)
 	}
 
 	// As the APIService doesn't have any labels currently set we need to
@@ -748,7 +755,7 @@ func pollTimed(ctx context.Context, interval, timeout time.Duration, condition w
 		elapsed := time.Since(start)
 		framework.Logf(msg, elapsed)
 	}(time.Now(), msg)
-	return wait.PollWithContext(ctx, interval, timeout, condition)
+	return wait.PollUntilContextTimeout(ctx, interval, timeout, false, condition)
 }
 
 func validateErrorWithDebugInfo(ctx context.Context, f *framework.Framework, err error, pods *v1.PodList, msg string, fields ...interface{}) {
@@ -757,9 +764,9 @@ func validateErrorWithDebugInfo(ctx context.Context, f *framework.Framework, err
 		msg := fmt.Sprintf(msg, fields...)
 		msg += fmt.Sprintf(" but received unexpected error:\n%v", err)
 		client := f.ClientSet
-		ep, err := client.CoreV1().Endpoints(namespace).Get(ctx, "sample-api", metav1.GetOptions{})
+		slices, err := client.DiscoveryV1().EndpointSlices(namespace).List(ctx, metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", discoveryv1.LabelServiceName, "sample-api")})
 		if err == nil {
-			msg += fmt.Sprintf("\nFound endpoints for sample-api:\n%v", ep)
+			msg += fmt.Sprintf("\nFound endpoint slices for sample-api:\n%v", slices)
 		}
 		pds, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 		if err == nil {
@@ -767,7 +774,7 @@ func validateErrorWithDebugInfo(ctx context.Context, f *framework.Framework, err
 			msg += fmt.Sprintf("\nOriginal pods in %s:\n%v", namespace, pods)
 		}
 
-		framework.Failf(msg)
+		framework.Fail(msg)
 	}
 }
 

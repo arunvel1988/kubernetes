@@ -83,9 +83,8 @@ var (
 		# Check to see if I can list deployments in my current namespace
 		kubectl auth can-i list deployments.apps
 
-		# Check to see if service account "foo" of namespace "dev" can list pods
-		# in the namespace "prod".
-		# You must be allowed to use impersonation for the global option "--as".
+		# Check to see if service account "foo" of namespace "dev" can list pods in the namespace "prod"
+		# You must be allowed to use impersonation for the global option "--as"
 		kubectl auth can-i list pods --as=system:serviceaccount:dev:foo -n prod
 
 		# Check to see if I can do everything in my current namespace ("*" means all)
@@ -106,10 +105,10 @@ var (
 		# List all allowed actions in namespace "foo"
 		kubectl auth can-i --list --namespace=foo`)
 
-	resourceVerbs       = sets.NewString("get", "list", "watch", "create", "update", "patch", "delete", "deletecollection", "use", "bind", "impersonate", "*", "approve")
-	nonResourceURLVerbs = sets.NewString("get", "put", "post", "head", "options", "delete", "patch", "*")
+	resourceVerbs       = sets.New[string]("get", "list", "watch", "create", "update", "patch", "delete", "deletecollection", "use", "bind", "impersonate", "*", "approve", "sign", "escalate", "attest")
+	nonResourceURLVerbs = sets.New[string]("get", "put", "post", "head", "options", "delete", "patch", "*")
 	// holds all the server-supported resources that cannot be discovered by clients. i.e. users and groups for the impersonate verb
-	nonStandardResourceNames = sets.NewString("users", "groups")
+	nonStandardResourceNames = sets.New[string]("users", "groups")
 )
 
 // NewCmdCanI returns an initialized Command for 'auth can-i' sub command

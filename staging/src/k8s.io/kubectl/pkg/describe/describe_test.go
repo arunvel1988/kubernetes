@@ -37,13 +37,12 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	discoveryv1beta1 "k8s.io/api/discovery/v1beta1"
 	networkingv1 "k8s.io/api/networking/v1"
-	networkingv1alpha1 "k8s.io/api/networking/v1alpha1"
 	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	policyv1 "k8s.io/api/policy/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	storagev1alpha1 "k8s.io/api/storage/v1alpha1"
+	storagev1beta1 "k8s.io/api/storage/v1beta1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -67,7 +66,7 @@ func TestDescribePod(t *testing.T) {
 	gracePeriod := int64(1234)
 	condition1 := corev1.PodConditionType("condition1")
 	condition2 := corev1.PodConditionType("condition2")
-	fake := fake.NewSimpleClientset(&corev1.Pod{
+	runningPod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:                       "bar",
 			Namespace:                  "foo",
@@ -85,6 +84,7 @@ func TestDescribePod(t *testing.T) {
 			},
 		},
 		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
 			Conditions: []corev1.PodCondition{
 				{
 					Type:   condition1,
@@ -92,18 +92,46 @@ func TestDescribePod(t *testing.T) {
 				},
 			},
 		},
-	})
-	c := &describeClient{T: t, Namespace: "foo", Interface: fake}
-	d := PodDescriber{c}
-	out, err := d.Describe("foo", "bar", DescriberSettings{ShowEvents: true})
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "bar") || !strings.Contains(out, "Status:") {
-		t.Errorf("unexpected out: %s", out)
+	tests := []struct {
+		name       string
+		namespace  string
+		phase      corev1.PodPhase
+		wantOutput []string
+	}{
+		{
+			name: "foo", namespace: "bar", phase: "Running",
+			wantOutput: []string{"bar", "Status:", "Terminating (lasts 10y)", "Termination Grace Period", "1234s"},
+		},
+		{
+			name: "pod1", namespace: "ns1", phase: "Pending",
+			wantOutput: []string{"pod1", "ns1", "Terminating (lasts 10y)", "Termination Grace Period", "1234s"},
+		},
+		{
+			name: "pod2", namespace: "ns2", phase: "Succeeded",
+			wantOutput: []string{"pod2", "ns2", "Succeeded"},
+		},
+		{
+			name: "pod3", namespace: "ns3", phase: "Failed",
+			wantOutput: []string{"pod3", "ns3", "Failed"},
+		},
 	}
-	if !strings.Contains(out, "Terminating (lasts 10y)") || !strings.Contains(out, "1234s") {
-		t.Errorf("unexpected out: %s", out)
+
+	for i, test := range tests {
+		pod := runningPod.DeepCopy()
+		pod.Name, pod.Namespace, pod.Status.Phase = test.name, test.namespace, test.phase
+		fake := fake.NewSimpleClientset(pod)
+		c := &describeClient{T: t, Namespace: pod.Namespace, Interface: fake}
+		d := PodDescriber{c}
+		out, err := d.Describe(pod.Namespace, pod.Name, DescriberSettings{ShowEvents: true})
+		if err != nil {
+			t.Errorf("case %d: unexpected error: %v", i, err)
+		}
+		for _, wantStr := range test.wantOutput {
+			if !strings.Contains(out, wantStr) {
+				t.Errorf("case %d didn't contain want(%s): unexpected out:\n%s", i, wantStr, out)
+			}
+		}
 	}
 }
 
@@ -238,6 +266,53 @@ func TestDescribePodTolerations(t *testing.T) {
 		!strings.Contains(out, "Tolerations:") {
 		t.Errorf("unexpected out:\n%s", out)
 	}
+}
+
+func TestDescribePodVolumes(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bar",
+			Namespace: "foo",
+		},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				{
+					Name:         "image",
+					VolumeSource: corev1.VolumeSource{Image: &corev1.ImageVolumeSource{Reference: "image", PullPolicy: corev1.PullIfNotPresent}},
+				},
+			},
+		},
+	}
+
+	expected := dedent.Dedent(`
+				Name:         bar
+				Namespace:    foo
+				Node:         <none>
+				Labels:       <none>
+				Annotations:  <none>
+				Status:       
+				IP:           
+				IPs:          <none>
+				Containers: <none>
+				Volumes:
+				  image:
+				    Type:        Image (a container image or OCI artifact)
+				    Reference:   image
+				    PullPolicy:  IfNotPresent
+				QoS Class:       BestEffort
+				Node-Selectors:  <none>
+				Tolerations:     <none>
+				Events:          <none>
+			`)[1:]
+
+	fakeClient := fake.NewSimpleClientset(pod)
+	c := &describeClient{T: t, Namespace: "foo", Interface: fakeClient}
+	d := PodDescriber{c}
+	out, err := d.Describe("foo", "bar", DescriberSettings{ShowEvents: true})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	assert.Equal(t, expected, out)
 }
 
 func TestDescribeTopologySpreadConstraints(t *testing.T) {
@@ -681,7 +756,18 @@ func TestDescribeService(t *testing.T) {
 					LoadBalancerIP:        "5.6.7.8",
 					SessionAffinity:       corev1.ServiceAffinityNone,
 					ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
+					InternalTrafficPolicy: ptr.To(corev1.ServiceInternalTrafficPolicyCluster),
 					HealthCheckNodePort:   32222,
+				},
+				Status: corev1.ServiceStatus{
+					LoadBalancer: corev1.LoadBalancerStatus{
+						Ingress: []corev1.LoadBalancerIngress{
+							{
+								IP:     "5.6.7.8",
+								IPMode: ptr.To(corev1.LoadBalancerIPModeVIP),
+							},
+						},
+					},
 				},
 			},
 			endpointSlices: []*discoveryv1.EndpointSlice{{
@@ -693,9 +779,9 @@ func TestDescribeService(t *testing.T) {
 					},
 				},
 				Endpoints: []discoveryv1.Endpoint{
-					{Addresses: []string{"10.244.0.1"}},
-					{Addresses: []string{"10.244.0.2"}},
-					{Addresses: []string{"10.244.0.3"}},
+					{Addresses: []string{"10.244.0.1"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}},
+					{Addresses: []string{"10.244.0.2"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}},
+					{Addresses: []string{"10.244.0.3"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}},
 				},
 				Ports: []discoveryv1.EndpointPort{{
 					Name:     ptr.To("port-tcp"),
@@ -713,13 +799,15 @@ func TestDescribeService(t *testing.T) {
 				IP Families:              IPv4
 				IP:                       1.2.3.4
 				IPs:                      <none>
-				IP:                       5.6.7.8
+				Desired LoadBalancer IP:  5.6.7.8
+				LoadBalancer Ingress:     5.6.7.8 (VIP)
 				Port:                     port-tcp  8080/TCP
 				TargetPort:               9527/TCP
 				NodePort:                 port-tcp  31111/TCP
 				Endpoints:                10.244.0.1:9527,10.244.0.2:9527,10.244.0.3:9527
 				Session Affinity:         None
 				External Traffic Policy:  Local
+				Internal Traffic Policy:  Cluster
 				HealthCheck NodePort:     32222
 				Events:                   <none>
 			`)[1:],
@@ -746,7 +834,17 @@ func TestDescribeService(t *testing.T) {
 					LoadBalancerIP:        "5.6.7.8",
 					SessionAffinity:       corev1.ServiceAffinityNone,
 					ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
+					InternalTrafficPolicy: ptr.To(corev1.ServiceInternalTrafficPolicyLocal),
 					HealthCheckNodePort:   32222,
+				},
+				Status: corev1.ServiceStatus{
+					LoadBalancer: corev1.LoadBalancerStatus{
+						Ingress: []corev1.LoadBalancerIngress{
+							{
+								IP: "5.6.7.8",
+							},
+						},
+					},
 				},
 			},
 			endpointSlices: []*discoveryv1.EndpointSlice{
@@ -759,8 +857,8 @@ func TestDescribeService(t *testing.T) {
 						},
 					},
 					Endpoints: []discoveryv1.Endpoint{
-						{Addresses: []string{"10.244.0.1"}},
-						{Addresses: []string{"10.244.0.2"}},
+						{Addresses: []string{"10.244.0.1"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}},
+						{Addresses: []string{"10.244.0.2"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}},
 					},
 					Ports: []discoveryv1.EndpointPort{{
 						Name:     ptr.To("port-tcp"),
@@ -777,9 +875,9 @@ func TestDescribeService(t *testing.T) {
 						},
 					},
 					Endpoints: []discoveryv1.Endpoint{
-						{Addresses: []string{"10.244.0.3"}},
-						{Addresses: []string{"10.244.0.4"}},
-						{Addresses: []string{"10.244.0.5"}},
+						{Addresses: []string{"10.244.0.3"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(false)}},
+						{Addresses: []string{"10.244.0.4"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}},
+						{Addresses: []string{"10.244.0.5"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}},
 					},
 					Ports: []discoveryv1.EndpointPort{{
 						Name:     ptr.To("port-tcp"),
@@ -798,13 +896,80 @@ func TestDescribeService(t *testing.T) {
 				IP Families:              IPv4
 				IP:                       1.2.3.4
 				IPs:                      <none>
-				IP:                       5.6.7.8
+				Desired LoadBalancer IP:  5.6.7.8
+				LoadBalancer Ingress:     5.6.7.8
 				Port:                     port-tcp  8080/TCP
 				TargetPort:               targetPort/TCP
 				NodePort:                 port-tcp  31111/TCP
-				Endpoints:                10.244.0.1:9527,10.244.0.2:9527,10.244.0.3:9527 + 2 more...
+				Endpoints:                10.244.0.1:9527,10.244.0.2:9527,10.244.0.4:9527 + 1 more...
 				Session Affinity:         None
 				External Traffic Policy:  Local
+				Internal Traffic Policy:  Local
+				HealthCheck NodePort:     32222
+				Events:                   <none>
+			`)[1:],
+		},
+		{
+			name: "test-ready-field-empty",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+				Spec: corev1.ServiceSpec{
+					Type: corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{
+						Name:       "port-tcp",
+						Port:       8080,
+						Protocol:   corev1.ProtocolTCP,
+						TargetPort: intstr.FromInt32(9527),
+						NodePort:   31111,
+					}},
+					Selector:              map[string]string{"blah": "heh"},
+					ClusterIP:             "1.2.3.4",
+					IPFamilies:            []corev1.IPFamily{corev1.IPv4Protocol},
+					LoadBalancerIP:        "5.6.7.8",
+					SessionAffinity:       corev1.ServiceAffinityNone,
+					ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
+					InternalTrafficPolicy: ptr.To(corev1.ServiceInternalTrafficPolicyCluster),
+					HealthCheckNodePort:   32222,
+				},
+			},
+			endpointSlices: []*discoveryv1.EndpointSlice{{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bar-abcdef",
+					Namespace: "foo",
+					Labels: map[string]string{
+						"kubernetes.io/service-name": "bar",
+					},
+				},
+				Endpoints: []discoveryv1.Endpoint{
+					{Addresses: []string{"10.244.0.1"}},
+				},
+				Ports: []discoveryv1.EndpointPort{{
+					Name:     ptr.To("port-tcp"),
+					Port:     ptr.To[int32](9527),
+					Protocol: ptr.To(corev1.ProtocolTCP),
+				}},
+			}},
+			expected: dedent.Dedent(`
+				Name:                     bar
+				Namespace:                foo
+				Labels:                   <none>
+				Annotations:              <none>
+				Selector:                 blah=heh
+				Type:                     LoadBalancer
+				IP Families:              IPv4
+				IP:                       1.2.3.4
+				IPs:                      <none>
+				Desired LoadBalancer IP:  5.6.7.8
+				Port:                     port-tcp  8080/TCP
+				TargetPort:               9527/TCP
+				NodePort:                 port-tcp  31111/TCP
+				Endpoints:                10.244.0.1:9527
+				Session Affinity:         None
+				External Traffic Policy:  Local
+				Internal Traffic Policy:  Cluster
 				HealthCheck NodePort:     32222
 				Events:                   <none>
 			`)[1:],
@@ -843,7 +1008,7 @@ func TestDescribeService(t *testing.T) {
 					},
 				},
 				Endpoints: []discoveryv1.Endpoint{
-					{Addresses: []string{"10.244.0.1"}},
+					{Addresses: []string{"10.244.0.1"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}},
 				},
 				Ports: []discoveryv1.EndpointPort{{
 					Name:     ptr.To("port-tcp"),
@@ -861,7 +1026,7 @@ func TestDescribeService(t *testing.T) {
 				IP Families:              IPv4
 				IP:                       1.2.3.4
 				IPs:                      <none>
-				IP:                       5.6.7.8
+				Desired LoadBalancer IP:  5.6.7.8
 				Port:                     port-tcp  8080/TCP
 				TargetPort:               targetPort/TCP
 				NodePort:                 port-tcp  31111/TCP
@@ -910,7 +1075,7 @@ func TestDescribeService(t *testing.T) {
 				IP Families:              IPv4
 				IP:                       1.2.3.4
 				IPs:                      1.2.3.4
-				IP:                       5.6.7.8
+				Desired LoadBalancer IP:  5.6.7.8
 				Port:                     port-tcp  8080/TCP
 				TargetPort:               targetPort/TCP
 				NodePort:                 port-tcp  31111/TCP
@@ -1011,6 +1176,71 @@ func VerifyDatesInOrder(
 				previousTime = currentTime
 			}
 		}
+	}
+}
+
+func TestDescribeResources(t *testing.T) {
+	testCases := []struct {
+		resources        *corev1.ResourceRequirements
+		expectedElements map[string]int
+	}{
+		{
+			resources:        &corev1.ResourceRequirements{},
+			expectedElements: map[string]int{},
+		},
+		{
+			resources: &corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1000"),
+					corev1.ResourceMemory: resource.MustParse("100Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1000"),
+					corev1.ResourceMemory: resource.MustParse("100Mi"),
+				},
+			},
+			expectedElements: map[string]int{"cpu": 2, "memory": 2, "Requests": 1, "Limits": 1, "1k": 2, "100Mi": 2},
+		},
+		{
+			resources: &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1000"),
+					corev1.ResourceMemory: resource.MustParse("100Mi"),
+				},
+			},
+			expectedElements: map[string]int{"cpu": 1, "memory": 1, "Limits": 1, "1k": 1, "100Mi": 1},
+		},
+		{
+			resources: &corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1000"),
+					corev1.ResourceMemory: resource.MustParse("100Mi"),
+				},
+			},
+			expectedElements: map[string]int{"cpu": 1, "memory": 1, "Requests": 1, "1k": 1, "100Mi": 1},
+		},
+	}
+
+	for i, testCase := range testCases {
+		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+			out := new(bytes.Buffer)
+			writer := NewPrefixWriter(out)
+			describeResources(testCase.resources, writer, LEVEL_1)
+			output := out.String()
+			gotElements := make(map[string]int)
+			for key, val := range testCase.expectedElements {
+				count := strings.Count(output, key)
+				if count == 0 {
+					t.Errorf("expected to find %q in output: %q", val, output)
+					continue
+				}
+				gotElements[key] = count
+			}
+
+			if !reflect.DeepEqual(gotElements, testCase.expectedElements) {
+				t.Errorf("Expected %v, got %v in output string: %q", testCase.expectedElements, gotElements, output)
+			}
+		})
 	}
 }
 
@@ -2557,7 +2787,7 @@ func TestDescribeDeployment(t *testing.T) {
 					},
 					Type:                corev1.EventTypeNormal,
 					Reason:              "ScalingReplicaSet",
-					Message:             "Scaled up replica set bar-002 to 1",
+					Message:             "Scaled up replica set bar-002 from 0 to 1",
 					ReportingController: "deployment-controller",
 					EventTime:           metav1.NewMicroTime(time.Now().Add(-20 * time.Minute)),
 					Series: &corev1.EventSeries{
@@ -2578,7 +2808,7 @@ func TestDescribeDeployment(t *testing.T) {
 					},
 					Type:    corev1.EventTypeNormal,
 					Reason:  "ScalingReplicaSet",
-					Message: "Scaled up replica set bar-001 to 2",
+					Message: "Scaled up replica set bar-001 from 0 to 2",
 					Source: corev1.EventSource{
 						Component: "deployment-controller",
 					},
@@ -2597,7 +2827,7 @@ func TestDescribeDeployment(t *testing.T) {
 					},
 					Type:    corev1.EventTypeNormal,
 					Reason:  "ScalingReplicaSet",
-					Message: "Scaled up replica set bar-002 to 1",
+					Message: "Scaled up replica set bar-002 from 0 to 1",
 					Source: corev1.EventSource{
 						Component: "deployment-controller",
 					},
@@ -2616,7 +2846,7 @@ func TestDescribeDeployment(t *testing.T) {
 					},
 					Type:                corev1.EventTypeNormal,
 					Reason:              "ScalingReplicaSet",
-					Message:             "Scaled down replica set bar-002 to 1",
+					Message:             "Scaled down replica set bar-002 from 2 to 1",
 					ReportingController: "deployment-controller",
 					EventTime:           metav1.NewMicroTime(time.Now().Add(-1 * time.Minute)),
 				},
@@ -2627,10 +2857,10 @@ func TestDescribeDeployment(t *testing.T) {
 				"OldReplicaSets:    bar-001 (2/2 replicas created)",
 				"NewReplicaSet:     bar-002 (1/1 replicas created)",
 				"Events:\n",
-				"Normal  ScalingReplicaSet  12m (x3 over 20m)  deployment-controller  Scaled up replica set bar-002 to 1",
-				"Normal  ScalingReplicaSet  10m                deployment-controller  Scaled up replica set bar-001 to 2",
-				"Normal  ScalingReplicaSet  2m                 deployment-controller  Scaled up replica set bar-002 to 1",
-				"Normal  ScalingReplicaSet  60s                deployment-controller  Scaled down replica set bar-002 to 1",
+				"Normal  ScalingReplicaSet  12m (x3 over 20m)  deployment-controller  Scaled up replica set bar-002 from 0 to 1",
+				"Normal  ScalingReplicaSet  10m                deployment-controller  Scaled up replica set bar-001 from 0 to 2",
+				"Normal  ScalingReplicaSet  2m                 deployment-controller  Scaled up replica set bar-002 from 0 to 1",
+				"Normal  ScalingReplicaSet  60s                deployment-controller  Scaled down replica set bar-002 from 2 to 1",
 			},
 		},
 		{
@@ -2817,7 +3047,7 @@ func TestDescribeDeployment(t *testing.T) {
 					},
 					Type:                corev1.EventTypeNormal,
 					Reason:              "ScalingReplicaSet",
-					Message:             "Scaled up replica set bar-002 to 1",
+					Message:             "Scaled up replica set bar-002 from 0 to 1",
 					ReportingController: "deployment-controller",
 					EventTime:           metav1.NewMicroTime(time.Now().Add(-20 * time.Minute)),
 					Series: &corev1.EventSeries{
@@ -2838,7 +3068,7 @@ func TestDescribeDeployment(t *testing.T) {
 					},
 					Type:    corev1.EventTypeNormal,
 					Reason:  "ScalingReplicaSet",
-					Message: "Scaled up replica set bar-001 to 2",
+					Message: "Scaled up replica set bar-001 from 0 to 2",
 					Source: corev1.EventSource{
 						Component: "deployment-controller",
 					},
@@ -2857,7 +3087,7 @@ func TestDescribeDeployment(t *testing.T) {
 					},
 					Type:    corev1.EventTypeNormal,
 					Reason:  "ScalingReplicaSet",
-					Message: "Scaled up replica set bar-002 to 1",
+					Message: "Scaled up replica set bar-002 from 0 to 1",
 					Source: corev1.EventSource{
 						Component: "deployment-controller",
 					},
@@ -2876,7 +3106,7 @@ func TestDescribeDeployment(t *testing.T) {
 					},
 					Type:                corev1.EventTypeNormal,
 					Reason:              "ScalingReplicaSet",
-					Message:             "Scaled down replica set bar-002 to 1",
+					Message:             "Scaled down replica set bar-002 from 2 to 1",
 					ReportingController: "deployment-controller",
 					EventTime:           metav1.NewMicroTime(time.Now().Add(-1 * time.Minute)),
 				}, &corev1.Event{
@@ -2893,7 +3123,7 @@ func TestDescribeDeployment(t *testing.T) {
 					},
 					Type:                corev1.EventTypeNormal,
 					Reason:              "ScalingReplicaSet",
-					Message:             "Scaled up replica set bar-002 to 2",
+					Message:             "Scaled up replica set bar-002 from 0 to 2",
 					ReportingController: "deployment-controller",
 					EventTime:           metav1.NewMicroTime(time.Now().Add(-15 * time.Second)),
 				}, &corev1.Event{
@@ -2910,7 +3140,7 @@ func TestDescribeDeployment(t *testing.T) {
 					},
 					Type:                corev1.EventTypeNormal,
 					Reason:              "ScalingReplicaSet",
-					Message:             "Scaled down replica set bar-001 to 0",
+					Message:             "Scaled down replica set bar-001 from 2 to 0",
 					ReportingController: "deployment-controller",
 					EventTime:           metav1.NewMicroTime(time.Now().Add(-3 * time.Second)),
 				},
@@ -2921,12 +3151,12 @@ func TestDescribeDeployment(t *testing.T) {
 				"OldReplicaSets:    bar-001 (0/0 replicas created)",
 				"NewReplicaSet:     bar-002 (2/2 replicas created)",
 				"Events:\n",
-				"Normal  ScalingReplicaSet  12m (x3 over 20m)  deployment-controller  Scaled up replica set bar-002 to 1",
-				"Normal  ScalingReplicaSet  10m                deployment-controller  Scaled up replica set bar-001 to 2",
-				"Normal  ScalingReplicaSet  2m                 deployment-controller  Scaled up replica set bar-002 to 1",
-				"Normal  ScalingReplicaSet  60s                deployment-controller  Scaled down replica set bar-002 to 1",
-				"Normal  ScalingReplicaSet  15s                deployment-controller  Scaled up replica set bar-002 to 2",
-				"Normal  ScalingReplicaSet  3s                 deployment-controller  Scaled down replica set bar-001 to 0",
+				"Normal  ScalingReplicaSet  12m (x3 over 20m)  deployment-controller  Scaled up replica set bar-002 from 0 to 1",
+				"Normal  ScalingReplicaSet  10m                deployment-controller  Scaled up replica set bar-001 from 0 to 2",
+				"Normal  ScalingReplicaSet  2m                 deployment-controller  Scaled up replica set bar-002 from 0 to 1",
+				"Normal  ScalingReplicaSet  60s                deployment-controller  Scaled down replica set bar-002 from 2 to 1",
+				"Normal  ScalingReplicaSet  15s                deployment-controller  Scaled up replica set bar-002 from 0 to 2",
+				"Normal  ScalingReplicaSet  3s                 deployment-controller  Scaled down replica set bar-001 from 2 to 0",
 			},
 		},
 	}
@@ -3468,8 +3698,8 @@ Events:       <none>
 				t.Errorf("unexpected error: %v", err)
 			}
 			if out != test.output {
-				t.Logf(out)
-				t.Logf(test.output)
+				t.Log(out)
+				t.Log(test.output)
 				t.Errorf("expected: \n%q\n but got output: \n%q\n", test.output, out)
 			}
 		})
@@ -3606,7 +3836,7 @@ Parameters:   param1=value1,param2=value2
 Events:       <none>
 `
 
-	f := fake.NewSimpleClientset(&storagev1alpha1.VolumeAttributesClass{
+	f := fake.NewSimpleClientset(&storagev1beta1.VolumeAttributesClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
 			ResourceVersion: "4",
@@ -5122,7 +5352,7 @@ Parameters:
 				t.Errorf("unexpected error: %v", err)
 			}
 			if out != expectedOut {
-				t.Logf(out)
+				t.Log(out)
 				t.Errorf("expected : %q\n but got output:\n %q", test.output, out)
 			}
 		})
@@ -6301,7 +6531,7 @@ Events:         <none>` + "\n",
 				t.Errorf("unexpected error: %v", err)
 			}
 			if out != tc.output {
-				t.Logf(out)
+				t.Log(out)
 				t.Errorf("expected :\n%s\nbut got output:\n%s", tc.output, out)
 			}
 		})
@@ -6314,12 +6544,12 @@ func TestDescribeServiceCIDR(t *testing.T) {
 		input  *fake.Clientset
 		output string
 	}{
-		"ServiceCIDR v1alpha1": {
-			input: fake.NewSimpleClientset(&networkingv1alpha1.ServiceCIDR{
+		"ServiceCIDR v1beta1": {
+			input: fake.NewSimpleClientset(&networkingv1beta1.ServiceCIDR{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo.123",
 				},
-				Spec: networkingv1alpha1.ServiceCIDRSpec{
+				Spec: networkingv1beta1.ServiceCIDRSpec{
 					CIDRs: []string{"10.1.0.0/16", "fd00:1:1::/64"},
 				},
 			}),
@@ -6330,12 +6560,12 @@ Annotations:  <none>
 CIDRs:        10.1.0.0/16, fd00:1:1::/64
 Events:       <none>` + "\n",
 		},
-		"ServiceCIDR v1alpha1 IPv4": {
-			input: fake.NewSimpleClientset(&networkingv1alpha1.ServiceCIDR{
+		"ServiceCIDR v1beta1 IPv4": {
+			input: fake.NewSimpleClientset(&networkingv1beta1.ServiceCIDR{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo.123",
 				},
-				Spec: networkingv1alpha1.ServiceCIDRSpec{
+				Spec: networkingv1beta1.ServiceCIDRSpec{
 					CIDRs: []string{"10.1.0.0/16"},
 				},
 			}),
@@ -6346,12 +6576,60 @@ Annotations:  <none>
 CIDRs:        10.1.0.0/16
 Events:       <none>` + "\n",
 		},
-		"ServiceCIDR v1alpha1 IPv6": {
-			input: fake.NewSimpleClientset(&networkingv1alpha1.ServiceCIDR{
+		"ServiceCIDR v1beta1 IPv6": {
+			input: fake.NewSimpleClientset(&networkingv1beta1.ServiceCIDR{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo.123",
 				},
-				Spec: networkingv1alpha1.ServiceCIDRSpec{
+				Spec: networkingv1beta1.ServiceCIDRSpec{
+					CIDRs: []string{"fd00:1:1::/64"},
+				},
+			}),
+
+			output: `Name:         foo.123
+Labels:       <none>
+Annotations:  <none>
+CIDRs:        fd00:1:1::/64
+Events:       <none>` + "\n",
+		},
+		"ServiceCIDR v1": {
+			input: fake.NewSimpleClientset(&networkingv1.ServiceCIDR{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo.123",
+				},
+				Spec: networkingv1.ServiceCIDRSpec{
+					CIDRs: []string{"10.1.0.0/16", "fd00:1:1::/64"},
+				},
+			}),
+
+			output: `Name:         foo.123
+Labels:       <none>
+Annotations:  <none>
+CIDRs:        10.1.0.0/16, fd00:1:1::/64
+Events:       <none>` + "\n",
+		},
+		"ServiceCIDR v1 IPv4": {
+			input: fake.NewSimpleClientset(&networkingv1.ServiceCIDR{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo.123",
+				},
+				Spec: networkingv1.ServiceCIDRSpec{
+					CIDRs: []string{"10.1.0.0/16"},
+				},
+			}),
+
+			output: `Name:         foo.123
+Labels:       <none>
+Annotations:  <none>
+CIDRs:        10.1.0.0/16
+Events:       <none>` + "\n",
+		},
+		"ServiceCIDR v1 IPv6": {
+			input: fake.NewSimpleClientset(&networkingv1.ServiceCIDR{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo.123",
+				},
+				Spec: networkingv1.ServiceCIDRSpec{
 					CIDRs: []string{"fd00:1:1::/64"},
 				},
 			}),
@@ -6385,13 +6663,38 @@ func TestDescribeIPAddress(t *testing.T) {
 		input  *fake.Clientset
 		output string
 	}{
-		"IPAddress v1alpha1": {
-			input: fake.NewSimpleClientset(&networkingv1alpha1.IPAddress{
+		"IPAddress v1beta1": {
+			input: fake.NewSimpleClientset(&networkingv1beta1.IPAddress{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo.123",
 				},
-				Spec: networkingv1alpha1.IPAddressSpec{
-					ParentRef: &networkingv1alpha1.ParentReference{
+				Spec: networkingv1beta1.IPAddressSpec{
+					ParentRef: &networkingv1beta1.ParentReference{
+						Group:     "mygroup",
+						Resource:  "myresource",
+						Namespace: "mynamespace",
+						Name:      "myname",
+					},
+				},
+			}),
+
+			output: `Name:         foo.123
+Labels:       <none>
+Annotations:  <none>
+Parent Reference:
+  Group:      mygroup
+  Resource:   myresource
+  Namespace:  mynamespace
+  Name:       myname
+Events:       <none>` + "\n",
+		},
+		"IPAddress v1": {
+			input: fake.NewSimpleClientset(&networkingv1.IPAddress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo.123",
+				},
+				Spec: networkingv1.IPAddressSpec{
+					ParentRef: &networkingv1.ParentReference{
 						Group:     "mygroup",
 						Resource:  "myresource",
 						Namespace: "mynamespace",
@@ -6674,5 +6977,45 @@ func TestDescribeSeccompProfile(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDescribeProjectedVolumesOptionalSecret(t *testing.T) {
+	fake := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bar",
+			Namespace: "foo",
+		},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				{
+					Name: "optional-secret",
+					VolumeSource: corev1.VolumeSource{
+						Projected: &corev1.ProjectedVolumeSource{
+							Sources: []corev1.VolumeProjection{
+								{
+									Secret: &corev1.SecretProjection{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "optional-secret",
+										},
+										Optional: ptr.To(true),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	c := &describeClient{T: t, Namespace: "foo", Interface: fake}
+	d := PodDescriber{c}
+	out, err := d.Describe("foo", "bar", DescriberSettings{ShowEvents: true})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	expectedOut := "SecretName:  optional-secret\n    Optional:    true"
+	if !strings.Contains(out, expectedOut) {
+		t.Errorf("expected to find %q in output: %q", expectedOut, out)
 	}
 }

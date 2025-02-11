@@ -31,6 +31,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/pmezard/go-difflib/difflib"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -151,22 +152,6 @@ func VolumeMountMapToSlice(volumeMounts map[string]v1.VolumeMount) []v1.VolumeMo
 	return v
 }
 
-// GetExtraParameters builds a list of flag arguments two string-string maps, one with default, base commands and one with overrides
-func GetExtraParameters(overrides map[string]string, defaults map[string]string) []string {
-	var command []string
-	for k, v := range overrides {
-		if len(v) > 0 {
-			command = append(command, fmt.Sprintf("--%s=%s", k, v))
-		}
-	}
-	for k, v := range defaults {
-		if _, overrideExists := overrides[k]; !overrideExists {
-			command = append(command, fmt.Sprintf("--%s=%s", k, v))
-		}
-	}
-	return command
-}
-
 // PatchStaticPod applies patches stored in patchesDir to a static Pod.
 func PatchStaticPod(pod *v1.Pod, patchesDir string, output io.Writer) (*v1.Pod, error) {
 	// Marshal the Pod manifest into YAML.
@@ -243,6 +228,28 @@ func ReadStaticPodFromDisk(manifestPath string) (*v1.Pod, error) {
 	}
 
 	return pod, nil
+}
+
+// ReadMultipleStaticPodsFromDisk reads multiple known component static Pods from manifestDir
+// and returns a list of Pods objects.
+func ReadMultipleStaticPodsFromDisk(manifestDir string, components ...string) (map[string]*v1.Pod, error) {
+	var (
+		podMap = map[string]*v1.Pod{}
+		errs   []error
+	)
+	for _, c := range components {
+		path := kubeadmconstants.GetStaticPodFilepath(c, manifestDir)
+		pod, err := ReadStaticPodFromDisk(path)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		podMap[c] = pod
+	}
+	if len(errs) > 0 {
+		return nil, utilerrors.NewAggregate(errs)
+	}
+	return podMap, nil
 }
 
 // LivenessProbe creates a Probe object with a HTTPGet handler

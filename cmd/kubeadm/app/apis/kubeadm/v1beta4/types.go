@@ -371,7 +371,7 @@ type JoinConfiguration struct {
 	NodeRegistration NodeRegistrationOptions `json:"nodeRegistration,omitempty"`
 
 	// CACertPath is the path to the SSL certificate authority used to
-	// secure comunications between node and control-plane.
+	// secure communications between node and control-plane.
 	// Defaults to "/etc/kubernetes/pki/ca.crt".
 	// +optional
 	CACertPath string `json:"caCertPath,omitempty"`
@@ -607,7 +607,7 @@ type Timeouts struct {
 	// +optional
 	Discovery *metav1.Duration `json:"discovery,omitempty"`
 
-	// UpgradeManifests is the timeout for upgradring static Pod manifests
+	// UpgradeManifests is the timeout for upgrading static Pod manifests.
 	// Default: 5m
 	UpgradeManifests *metav1.Duration `json:"upgradeManifests,omitempty"`
 }
@@ -662,7 +662,7 @@ type UpgradeApplyConfiguration struct {
 
 	// SkipPhases is a list of phases to skip during command execution.
 	// NOTE: This field is currently ignored for "kubeadm upgrade apply", but in the future it will be supported.
-	SkipPhases []string
+	SkipPhases []string `json:"skipPhases,omitempty"`
 
 	// ImagePullPolicy specifies the policy for image pulling during kubeadm "upgrade apply" operations.
 	// The value of this field must be one of "Always", "IfNotPresent" or "Never".
@@ -748,6 +748,11 @@ type UpgradePlanConfiguration struct {
 	// DryRun tells if the dry run mode is enabled, don't apply any change if it is and just output what would be done.
 	// +optional
 	DryRun *bool `json:"dryRun,omitempty"`
+
+	// EtcdUpgrade instructs kubeadm to execute etcd upgrade during upgrades.
+	// Defaults to true.
+	// +optional
+	EtcdUpgrade *bool `json:"etcdUpgrade,omitempty"`
 
 	// IgnorePreflightErrors provides a slice of pre-flight errors to be ignored during the upgrade process, e.g. 'IsPrivilegedUser,Swap'.
 	// Value 'all' ignores errors from all checks.

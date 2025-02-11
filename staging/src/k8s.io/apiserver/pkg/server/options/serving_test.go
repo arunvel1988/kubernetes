@@ -46,6 +46,7 @@ import (
 	"k8s.io/client-go/discovery"
 	restclient "k8s.io/client-go/rest"
 	cliflag "k8s.io/component-base/cli/flag"
+	basecompatibility "k8s.io/component-base/compatibility"
 	"k8s.io/klog/v2/ktesting"
 	netutils "k8s.io/utils/net"
 )
@@ -276,9 +277,8 @@ func TestServerRunWithSNI(t *testing.T) {
 
 			// launch server
 			config := setUp(t)
-
 			v := fakeVersion()
-			config.Version = &v
+			config.EffectiveVersion = basecompatibility.NewEffectiveVersionFromString(v.String(), "", "")
 
 			config.EnableIndex = true
 			secureOptions := (&SecureServingOptions{
@@ -463,11 +463,9 @@ func certSignature(cert tls.Certificate) (string, error) {
 
 func fakeVersion() version.Info {
 	return version.Info{
-		Major:        "42",
-		Minor:        "42",
-		GitVersion:   "42",
-		GitCommit:    "34973274ccef6ab4dfaaf86599792fa9c3fe4689",
-		GitTreeState: "Dirty",
+		Major:      "42",
+		Minor:      "42",
+		GitVersion: "42.42",
 	}
 }
 

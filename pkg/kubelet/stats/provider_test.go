@@ -19,6 +19,8 @@ package stats
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +29,6 @@ import (
 	fuzz "github.com/google/gofuzz"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -76,11 +77,8 @@ func TestGetCgroupStats(t *testing.T) {
 		updateStats       = false
 	)
 
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
 	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+		mockCadvisor     = cadvisortest.NewMockInterface(t)
 		mockPodManager   = new(kubepodtest.MockManager)
 		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 
@@ -113,11 +111,8 @@ func TestGetCgroupCPUAndMemoryStats(t *testing.T) {
 		updateStats       = false
 	)
 
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
 	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+		mockCadvisor     = cadvisortest.NewMockInterface(t)
 		mockPodManager   = new(kubepodtest.MockManager)
 		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 
@@ -147,11 +142,8 @@ func TestRootFsStats(t *testing.T) {
 		containerInfoSeed = 2000
 	)
 
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
 	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+		mockCadvisor     = cadvisortest.NewMockInterface(t)
 		mockPodManager   = new(kubepodtest.MockManager)
 		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 
@@ -179,8 +171,6 @@ func TestRootFsStats(t *testing.T) {
 
 func TestHasDedicatedImageFs(t *testing.T) {
 	ctx := context.Background()
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
 	imageStatsExpected := &statsapi.FsStats{AvailableBytes: uint64Ptr(1)}
 
 	for desc, test := range map[string]struct {
@@ -213,7 +203,7 @@ func TestHasDedicatedImageFs(t *testing.T) {
 	} {
 		t.Logf("TestCase %q", desc)
 		var (
-			mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+			mockCadvisor     = cadvisortest.NewMockInterface(t)
 			mockPodManager   = new(kubepodtest.MockManager)
 			mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 		)
@@ -359,6 +349,23 @@ func getTestFsInfo(seed int) cadvisorapiv2.FsInfo {
 	}
 }
 
+func getTestFsInfoWithDifferentMount(seed int, device string) cadvisorapiv2.FsInfo {
+	var (
+		inodes     = uint64(seed + offsetFsInodes)
+		inodesFree = uint64(seed + offsetFsInodesFree)
+	)
+	return cadvisorapiv2.FsInfo{
+		Timestamp:  time.Now(),
+		Device:     device,
+		Mountpoint: "test-mount-point",
+		Capacity:   uint64(seed + offsetFsCapacity),
+		Available:  uint64(seed + offsetFsAvailable),
+		Usage:      uint64(seed + offsetFsUsage),
+		Inodes:     &inodes,
+		InodesFree: &inodesFree,
+	}
+}
+
 func getPodVolumeStats(seed int, volumeName string) statsapi.VolumeStats {
 	availableBytes := uint64(seed + offsetFsAvailable)
 	capacityBytes := uint64(seed + offsetFsCapacity)
@@ -439,7 +446,7 @@ func checkNetworkStats(t *testing.T, label string, seed int, stats *statsapi.Net
 	assert.EqualValues(t, seed+offsetNetTxBytes, *stats.TxBytes, label+".Net.TxBytes")
 	assert.EqualValues(t, seed+offsetNetTxErrors, *stats.TxErrors, label+".Net.TxErrors")
 
-	assert.EqualValues(t, 2, len(stats.Interfaces), "network interfaces should contain 2 elements")
+	assert.Len(t, stats.Interfaces, 2, "network interfaces should contain 2 elements")
 
 	assert.EqualValues(t, "eth0", stats.Interfaces[0].Name, "default interface name is not eth0")
 	assert.EqualValues(t, seed+offsetNetRxBytes, *stats.Interfaces[0].RxBytes, label+".Net.TxErrors")
@@ -498,6 +505,39 @@ func checkFsStats(t *testing.T, label string, seed int, stats *statsapi.FsStats)
 	assert.EqualValues(t, seed+offsetFsAvailable, *stats.AvailableBytes, label+".AvailableBytes")
 	assert.EqualValues(t, seed+offsetFsInodes, *stats.Inodes, label+".Inodes")
 	assert.EqualValues(t, seed+offsetFsInodesFree, *stats.InodesFree, label+".InodesFree")
+}
+
+func checkContainersSwapStats(t *testing.T, podStats statsapi.PodStats, containerStats ...cadvisorapiv2.ContainerInfo) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+
+	podContainers := make(map[string]struct{}, len(podStats.Containers))
+	for _, container := range podStats.Containers {
+		podContainers[container.Name] = struct{}{}
+	}
+
+	for _, container := range containerStats {
+		found := false
+		containerName := container.Spec.Labels["io.kubernetes.container.name"]
+		for _, containerPodStats := range podStats.Containers {
+			if containerPodStats.Name == containerName {
+				assert.Equal(t, container.Stats[0].Memory.Swap, *containerPodStats.Swap.SwapUsageBytes)
+				found = true
+			}
+		}
+		assert.True(t, found, "container %s not found in pod stats", container.Spec.Labels["io.kubernetes.container.name"])
+		delete(podContainers, containerName)
+	}
+
+	var missingContainerNames []string
+	for containerName := range podContainers {
+		missingContainerNames = append(missingContainerNames, containerName)
+	}
+	assert.Emptyf(t, podContainers, "containers not found in pod stats: %v", strings.Join(missingContainerNames, " "))
+	if len(missingContainerNames) > 0 {
+		assert.FailNow(t, "containers not found in pod stats")
+	}
 }
 
 func checkEphemeralStats(t *testing.T, label string, containerSeeds []int, volumeSeeds []int, containerLogStats []*volume.Metrics, stats *statsapi.FsStats) {

@@ -17,14 +17,19 @@ limitations under the License.
 package replicaset
 
 import (
+	"k8s.io/utils/ptr"
 	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	podtest "k8s.io/kubernetes/pkg/api/pod/testing"
 	"k8s.io/kubernetes/pkg/apis/apps"
 	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/features"
 )
 
 const (
@@ -49,11 +54,7 @@ func TestReplicaSetStrategy(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Labels: validSelector,
 			},
-			Spec: api.PodSpec{
-				RestartPolicy: api.RestartPolicyAlways,
-				DNSPolicy:     api.DNSClusterFirst,
-				Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-			},
+			Spec: podtest.MakePodSpec(),
 		},
 	}
 	rs := &apps.ReplicaSet{
@@ -151,6 +152,70 @@ func TestReplicaSetStatusStrategy(t *testing.T) {
 	}
 }
 
+func TestReplicaSetStatusStrategyWithDeploymentPodReplacementPolicy(t *testing.T) {
+	tests := []struct {
+		name                                 string
+		enableDeploymentPodReplacementPolicy bool
+		terminatingReplicas                  *int32
+		terminatingReplicasUpdate            *int32
+		expectedTerminatingReplicas          *int32
+	}{
+		{
+			name:                                 "should not allow updates when feature gate is disabled",
+			enableDeploymentPodReplacementPolicy: false,
+			terminatingReplicas:                  nil,
+			terminatingReplicasUpdate:            ptr.To[int32](2),
+			expectedTerminatingReplicas:          nil,
+		},
+		{
+			name:                                 "should allow update when the field is in use when feature gate is disabled",
+			enableDeploymentPodReplacementPolicy: false,
+			terminatingReplicas:                  ptr.To[int32](2),
+			terminatingReplicasUpdate:            ptr.To[int32](5),
+			expectedTerminatingReplicas:          ptr.To[int32](5),
+		},
+		{
+			name:                                 "should allow updates when feature gate is enabled",
+			enableDeploymentPodReplacementPolicy: true,
+			terminatingReplicas:                  nil,
+			terminatingReplicasUpdate:            ptr.To[int32](2),
+			expectedTerminatingReplicas:          ptr.To[int32](2),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DeploymentPodReplacementPolicy, tc.enableDeploymentPodReplacementPolicy)
+
+			ctx := genericapirequest.NewDefaultContext()
+			validSelector := map[string]string{"a": "b"}
+			oldRS := newReplicaSetWithSelectorLabels(validSelector)
+			oldRS.Spec.Replicas = 3
+			oldRS.Status.Replicas = 3
+			oldRS.Status.TerminatingReplicas = tc.terminatingReplicas
+
+			newRS := newReplicaSetWithSelectorLabels(validSelector)
+			newRS.Spec.Replicas = 3
+			newRS.Status.Replicas = 2
+			newRS.Status.TerminatingReplicas = tc.terminatingReplicasUpdate
+
+			StatusStrategy.PrepareForUpdate(ctx, newRS, oldRS)
+			if newRS.Status.Replicas != 2 {
+				t.Errorf("ReplicaSet status updates should allow change of replicas: %v", newRS.Status.Replicas)
+			}
+			if !ptr.Equal(newRS.Status.TerminatingReplicas, tc.expectedTerminatingReplicas) {
+				t.Errorf("ReplicaSet status updates failed, expected terminating pods: %v, got: %v", ptr.Deref(tc.expectedTerminatingReplicas, -1), ptr.Deref(newRS.Status.TerminatingReplicas, -1))
+			}
+
+			errs := StatusStrategy.ValidateUpdate(ctx, newRS, oldRS)
+
+			if len(errs) != 0 {
+				t.Errorf("Unexpected error %v", errs)
+			}
+		})
+	}
+}
+
 func TestSelectorImmutability(t *testing.T) {
 	tests := []struct {
 		requestInfo       genericapirequest.RequestInfo
@@ -218,11 +283,7 @@ func newReplicaSetWithSelectorLabels(selectorLabels map[string]string) *apps.Rep
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: selectorLabels,
 				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSClusterFirst,
-					Containers:    []api.Container{{Name: fakeImageName, Image: fakeImage, ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-				},
+				Spec: podtest.MakePodSpec(),
 			},
 		},
 	}

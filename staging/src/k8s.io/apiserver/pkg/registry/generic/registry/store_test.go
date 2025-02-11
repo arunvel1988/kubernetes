@@ -45,6 +45,7 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/apis/example"
 	examplev1 "k8s.io/apiserver/pkg/apis/example/v1"
@@ -447,6 +448,8 @@ func TestStoreCreateWithRetryNameGenerate(t *testing.T) {
 }
 
 func TestStoreCreateWithRetryNameGenerateFeatureDisabled(t *testing.T) {
+	// Preserve testing of disabled RetryGenerateName feature gate since it can still be disabled when emulation version is set.
+	featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.31"))
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.RetryGenerateName, false)
 	namedObj := func(id int) *example.Pod {
 		return &example.Pod{
@@ -2432,22 +2435,31 @@ func newTestGenericStoreRegistry(t *testing.T, scheme *runtime.Scheme, hasCacheE
 	}
 	if hasCacheEnabled {
 		config := cacherstorage.Config{
-			Storage:        s,
-			Versioner:      storage.APIObjectVersioner{},
-			GroupResource:  schema.GroupResource{Resource: "pods"},
-			ResourcePrefix: podPrefix,
-			KeyFunc:        func(obj runtime.Object) (string, error) { return storage.NoNamespaceKeyFunc(podPrefix, obj) },
-			GetAttrsFunc:   getPodAttrs,
-			NewFunc:        newFunc,
-			NewListFunc:    newListFunc,
-			Codec:          sc.Codec,
+			Storage:             s,
+			Versioner:           storage.APIObjectVersioner{},
+			GroupResource:       schema.GroupResource{Resource: "pods"},
+			EventsHistoryWindow: cacherstorage.DefaultEventFreshDuration,
+			ResourcePrefix:      podPrefix,
+			KeyFunc:             func(obj runtime.Object) (string, error) { return storage.NoNamespaceKeyFunc(podPrefix, obj) },
+			GetAttrsFunc:        getPodAttrs,
+			NewFunc:             newFunc,
+			NewListFunc:         newListFunc,
+			Codec:               sc.Codec,
 		}
 		cacher, err := cacherstorage.NewCacherFromConfig(config)
 		if err != nil {
 			t.Fatalf("Couldn't create cacher: %v", err)
 		}
+		if utilfeature.DefaultFeatureGate.Enabled(features.ResilientWatchCacheInitialization) {
+			// The tests assume that Get/GetList/Watch calls shouldn't fail.
+			// However, 429 error can now be returned if watchcache is under initialization.
+			// To avoid rewriting all tests, we wait for watchcache to initialize.
+			if err := cacher.Wait(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
 		d := destroyFunc
-		s = cacher
+		s = cacherstorage.NewCacheProxy(cacher, s)
 		destroyFunc = func() {
 			cacher.Stop()
 			d()
@@ -2973,6 +2985,8 @@ func (p *predictableNameGenerator) GenerateName(base string) string {
 }
 
 func TestStoreCreateGenerateNameConflict(t *testing.T) {
+	// Preserve testing of disabled RetryGenerateName feature gate since it can still be disabled when emulation version is set.
+	featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.31"))
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.RetryGenerateName, false)
 
 	// podA will be stored with name foo12345

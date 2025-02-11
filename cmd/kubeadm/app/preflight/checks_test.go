@@ -38,7 +38,7 @@ import (
 	fakeexec "k8s.io/utils/exec/testing"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	configutil "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 )
 
@@ -902,11 +902,6 @@ func TestInitIPCheck(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("unsupported OS")
 	}
-	// should be a privileged user for the `init` command, otherwise just skip it.
-	isPrivileged := IsPrivilegedUserCheck{}
-	if _, err := isPrivileged.Check(); err != nil {
-		t.Skip("not a privileged user")
-	}
 	internalcfg, err := configutil.DefaultedStaticInitConfiguration()
 	if err != nil {
 		t.Fatalf("unexpected failure when defaulting InitConfiguration: %v", err)
@@ -968,11 +963,6 @@ func TestJoinIPCheck(t *testing.T) {
 	// skip this test, if OS in not Linux, since it will ONLY pass on Linux.
 	if runtime.GOOS != "linux" {
 		t.Skip("unsupported OS")
-	}
-	// should be a privileged user for the `join` command, otherwise just skip it.
-	isPrivileged := IsPrivilegedUserCheck{}
-	if _, err := isPrivileged.Check(); err != nil {
-		t.Skip("not a privileged user")
 	}
 
 	opts := configutil.LoadOrDefaultConfigurationOptions{

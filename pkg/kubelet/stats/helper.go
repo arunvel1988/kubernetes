@@ -155,6 +155,7 @@ func cadvisorInfoToContainerCPUAndMemoryStats(name string, info *cadvisorapiv2.C
 	cpu, memory := cadvisorInfoToCPUandMemoryStats(info)
 	result.CPU = cpu
 	result.Memory = memory
+	result.Swap = cadvisorInfoToSwapStats(info)
 
 	return result
 }
@@ -166,6 +167,31 @@ func cadvisorInfoToProcessStats(info *cadvisorapiv2.ContainerInfo) *statsapi.Pro
 	}
 	num := cstat.Processes.ProcessCount
 	return &statsapi.ProcessStats{ProcessCount: uint64Ptr(num)}
+}
+
+func mergeProcessStats(first *statsapi.ProcessStats, second *statsapi.ProcessStats) *statsapi.ProcessStats {
+	if first == nil && second == nil {
+		return nil
+	}
+
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+
+	firstProcessCount := uint64(0)
+	if first.ProcessCount != nil {
+		firstProcessCount = *first.ProcessCount
+	}
+
+	secondProcessCount := uint64(0)
+	if second.ProcessCount != nil {
+		secondProcessCount = *second.ProcessCount
+	}
+
+	return &statsapi.ProcessStats{ProcessCount: uint64Ptr(firstProcessCount + secondProcessCount)}
 }
 
 // cadvisorInfoToNetworkStats returns the statsapi.NetworkStats converted from
@@ -318,7 +344,7 @@ func getCgroupInfo(cadvisor cadvisor.Interface, containerName string, updateStat
 		MaxAge:    maxAge,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get container info for %q: %v", containerName, err)
+		return nil, fmt.Errorf("failed to get container info for %q: %w", containerName, err)
 	}
 	if len(infoMap) != 1 {
 		return nil, fmt.Errorf("unexpected number of containers: %v", len(infoMap))

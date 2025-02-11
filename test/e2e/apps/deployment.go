@@ -161,7 +161,7 @@ var _ = SIGDescribe("Deployment", func() {
 		testProportionalScalingDeployment(ctx, f)
 	})
 	ginkgo.It("should not disrupt a cloud load-balancer's connectivity during rollout", func(ctx context.Context) {
-		e2eskipper.SkipUnlessProviderIs("aws", "azure", "gce", "gke")
+		e2eskipper.SkipUnlessProviderIs("aws", "azure", "gce")
 		e2eskipper.SkipIfIPv6("aws")
 		nodes, err := e2enode.GetReadySchedulableNodes(ctx, c)
 		framework.ExpectNoError(err)
@@ -396,9 +396,6 @@ var _ = SIGDescribe("Deployment", func() {
 
 		ginkgo.By("patching the DeploymentStatus")
 		deploymentStatusPatch, err := json.Marshal(map[string]interface{}{
-			"metadata": map[string]interface{}{
-				"labels": map[string]string{"test-deployment": "patched-status"},
-			},
 			"status": map[string]interface{}{
 				"readyReplicas":     testDeploymentNoReplicas,
 				"availableReplicas": testDeploymentAvailableReplicas,
@@ -416,7 +413,9 @@ var _ = SIGDescribe("Deployment", func() {
 			case watch.Modified:
 				if deployment, ok := event.Object.(*appsv1.Deployment); ok {
 					found := deployment.ObjectMeta.Name == testDeployment.Name &&
-						deployment.ObjectMeta.Labels["test-deployment-static"] == "true"
+						deployment.Status.ReadyReplicas == testDeploymentNoReplicas &&
+						deployment.Status.AvailableReplicas == testDeploymentAvailableReplicas
+
 					return found, nil
 				}
 			default:
@@ -1153,7 +1152,7 @@ func testDeploymentsControllerRef(ctx context.Context, f *framework.Framework) {
 	framework.ExpectNoError(err)
 
 	ginkgo.By("Wait for the ReplicaSet to be orphaned")
-	err = wait.PollWithContext(ctx, dRetryPeriod, dRetryTimeout, waitDeploymentReplicaSetsOrphaned(c, ns, podLabels))
+	err = wait.PollUntilContextTimeout(ctx, dRetryPeriod, dRetryTimeout, false, waitDeploymentReplicaSetsOrphaned(c, ns, podLabels))
 	framework.ExpectNoError(err, "error waiting for Deployment ReplicaSet to be orphaned")
 
 	deploymentName = "test-adopt-deployment"

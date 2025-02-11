@@ -66,7 +66,7 @@ func (rp *ReservePlugin) Unreserve(ctx context.Context, state *framework.CycleSt
 	rp.numUnreserveCalled += 1
 }
 
-func (rp *ReservePlugin) EventsToRegister() []framework.ClusterEventWithHint {
+func (rp *ReservePlugin) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
 	return []framework.ClusterEventWithHint{
 		{
 			Event: framework.ClusterEvent{Resource: framework.Node, ActionType: framework.Add},
@@ -74,7 +74,7 @@ func (rp *ReservePlugin) EventsToRegister() []framework.ClusterEventWithHint {
 				return framework.Queue, nil
 			},
 		},
-	}
+	}, nil
 }
 
 type PermitPlugin struct {
@@ -103,7 +103,7 @@ func (pp *PermitPlugin) Permit(ctx context.Context, state *framework.CycleState,
 	return nil, 0
 }
 
-func (pp *PermitPlugin) EventsToRegister() []framework.ClusterEventWithHint {
+func (pp *PermitPlugin) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
 	return []framework.ClusterEventWithHint{
 		{
 			Event: framework.ClusterEvent{Resource: framework.Node, ActionType: framework.Add},
@@ -111,7 +111,7 @@ func (pp *PermitPlugin) EventsToRegister() []framework.ClusterEventWithHint {
 				return framework.Queue, nil
 			},
 		},
-	}
+	}, nil
 }
 
 func TestReScheduling(t *testing.T) {
@@ -205,7 +205,7 @@ func TestReScheduling(t *testing.T) {
 			// Create a plugin registry for testing. Register only a permit plugin.
 			registry, prof := InitRegistryAndConfig(t, nil, test.plugins...)
 
-			testCtx, teardown := InitTestSchedulerForFrameworkTest(t, testContext, 2,
+			testCtx, teardown := InitTestSchedulerForFrameworkTest(t, testContext, 2, true,
 				scheduler.WithProfiles(prof),
 				scheduler.WithFrameworkOutOfTreeRegistry(registry))
 			defer teardown()
@@ -235,7 +235,7 @@ func TestReScheduling(t *testing.T) {
 			}
 
 			if test.wantScheduled {
-				if err = testutils.WaitForPodToSchedule(testCtx.ClientSet, pod); err != nil {
+				if err = testutils.WaitForPodToSchedule(testCtx.Ctx, testCtx.ClientSet, pod); err != nil {
 					t.Errorf("Didn't expect the pod to be unschedulable. error: %v", err)
 				}
 			} else if test.wantError {

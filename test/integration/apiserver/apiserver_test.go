@@ -26,12 +26,14 @@ import (
 	"net/http"
 	"path"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -47,28 +49,39 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	jsonserializer "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/runtime/serializer/protobuf"
+	"k8s.io/apimachinery/pkg/runtime/serializer/recognizer"
 	"k8s.io/apimachinery/pkg/runtime/serializer/streaming"
 	"k8s.io/apimachinery/pkg/types"
+	utiljson "k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/endpoints/handlers"
 	"k8s.io/apiserver/pkg/storage/storagebackend"
+	"k8s.io/apiserver/pkg/util/compatibility"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	clientset "k8s.io/client-go/kubernetes"
 	appsv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
 	"k8s.io/client-go/metadata"
 	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/pager"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/cmd/kube-apiserver/app/options"
 	kubeapiservertesting "k8s.io/kubernetes/cmd/kube-apiserver/app/testing"
 	"k8s.io/kubernetes/pkg/controlplane"
+	"k8s.io/kubernetes/pkg/kubeapiserver"
 	"k8s.io/kubernetes/test/integration"
 	"k8s.io/kubernetes/test/integration/etcd"
 	"k8s.io/kubernetes/test/integration/framework"
 	"k8s.io/kubernetes/test/utils/ktesting"
+	"k8s.io/utils/ptr"
 )
 
 func setup(t *testing.T, groupVersions ...schema.GroupVersion) (context.Context, clientset.Interface, *restclient.Config, framework.TearDownFunc) {
@@ -219,7 +232,7 @@ func Test4xxStatusCodeInvalidPatch(t *testing.T) {
 }
 
 func TestCacheControl(t *testing.T) {
-	server := kubeapiservertesting.StartTestServerOrDie(t, nil, nil, framework.SharedEtcd())
+	server := kubeapiservertesting.StartTestServerOrDie(t, nil, framework.DefaultTestServerFlags(), framework.SharedEtcd())
 	defer server.TearDownFn()
 
 	rt, err := restclient.TransportFor(server.ClientConfig)
@@ -1666,6 +1679,203 @@ func TestGetSubresourcesAsTables(t *testing.T) {
 	}
 }
 
+func TestGetScaleSubresourceAsTableForAllBuiltins(t *testing.T) {
+	// KUBE_APISERVER_SERVE_REMOVED_APIS_FOR_ONE_RELEASE allows for APIs pending removal to not block tests
+	t.Setenv("KUBE_APISERVER_SERVE_REMOVED_APIS_FOR_ONE_RELEASE", "true")
+
+	// Enable all features for testing
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, "AllAlpha", true)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, "AllBeta", true)
+
+	testNamespace := "test-scale"
+	server := kubeapiservertesting.StartTestServerOrDie(t, nil, framework.DefaultTestServerFlags(), framework.SharedEtcd())
+	defer server.TearDownFn()
+
+	clientset := clientset.NewForConfigOrDie(server.ClientConfig)
+
+	ns := framework.CreateNamespaceOrDie(clientset, testNamespace, t)
+	defer framework.DeleteNamespaceOrDie(clientset, ns, t)
+
+	scaleResources := map[string]runtime.Object{
+		"deployments.apps/v1": &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "dummy",
+			},
+			Spec: apps.DeploymentSpec{
+				Replicas: ptr.To[int32](1),
+				Selector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"app": "dummy",
+					},
+				},
+				Template: v1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"app": "dummy",
+						},
+					},
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
+							{
+								Name:  "dummy-container",
+								Image: "nginx:latest",
+							},
+						},
+					},
+				},
+			},
+		},
+		"replicasets.apps/v1": &apps.ReplicaSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "dummy",
+			},
+			Spec: apps.ReplicaSetSpec{
+				Replicas: ptr.To[int32](1),
+				Selector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"app": "dummy",
+					},
+				},
+				Template: v1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"app": "dummy",
+						},
+					},
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
+							{
+								Name:  "dummy-container",
+								Image: "nginx:latest",
+							},
+						},
+					},
+				},
+			},
+		},
+		"statefulsets.apps/v1": &apps.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "dummy",
+			},
+			Spec: apps.StatefulSetSpec{
+				ServiceName: "dummy",
+				Replicas:    ptr.To[int32](1),
+				Selector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"app": "dummy",
+					},
+				},
+				Template: v1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"app": "dummy",
+						},
+					},
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
+							{
+								Name:  "dummy-container",
+								Image: "nginx:latest",
+							},
+						},
+					},
+				},
+			},
+		},
+		"replicationcontrollers.v1": &v1.ReplicationController{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "dummy",
+			},
+			Spec: v1.ReplicationControllerSpec{
+				Replicas: ptr.To[int32](1),
+				Selector: map[string]string{
+					"app": "dummy",
+				},
+				Template: &v1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"app": "dummy",
+						},
+					},
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
+							{
+								Name:  "dummy-container",
+								Image: "nginx:latest",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, serverResources, err := clientset.Discovery().ServerGroupsAndResources()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, resourceList := range serverResources {
+		for _, resource := range resourceList.APIResources {
+			if !strings.Contains(resource.Name, "/scale") {
+				continue
+			}
+			resourceName := strings.Split(resource.Name, "/")[0]
+			// we can safely skip error here, since the group version is coming from the server
+			groupVersion, _ := schema.ParseGroupVersion(resourceList.GroupVersion)
+
+			t.Run(resourceName, func(t *testing.T) {
+				_, ctx := ktesting.NewTestContext(t)
+				scaleResourceObjName := fmt.Sprintf("%s.%s", resourceName, resourceList.GroupVersion)
+				obj, ok := scaleResources[scaleResourceObjName]
+				if !ok {
+					t.Fatalf("sample resource for %s not found in scaleResources", scaleResourceObjName)
+				}
+
+				cfg := dynamic.ConfigFor(server.ClientConfig)
+				if len(groupVersion.Group) == 0 {
+					cfg = dynamic.ConfigFor(server.ClientConfig)
+					cfg.APIPath = "/api"
+				} else {
+					cfg.APIPath = "/apis"
+				}
+				cfg.GroupVersion = &groupVersion
+				client, err := restclient.RESTClientFor(cfg)
+				if err != nil {
+					t.Fatalf("failed to create RESTClient: %v", err)
+				}
+
+				err = client.Post().
+					NamespaceIfScoped(testNamespace, resource.Namespaced).Resource(resourceName).
+					VersionedParams(&metav1.CreateOptions{}, metav1.ParameterCodec).
+					Body(obj).Do(ctx).Error()
+				if err != nil {
+					t.Fatalf("failed to create object: %v", err)
+				}
+
+				metaAccessor, err := meta.Accessor(obj)
+				if err != nil {
+					t.Fatalf("failed to get metadata accessor: %v", err)
+				}
+				res := client.Get().
+					NamespaceIfScoped(testNamespace, resource.Namespaced).Resource(resourceName).
+					SetHeader("Accept", "application/json;as=Table;g=meta.k8s.io;v=v1").
+					Name(metaAccessor.GetName()).
+					SubResource("scale").
+					Do(ctx)
+				resObj, err := res.Get()
+				if err != nil {
+					t.Fatalf("failed to retrieve object from response: %v", err)
+				}
+				actualKind := resObj.GetObjectKind().GroupVersionKind().Kind
+				if actualKind != "Table" {
+					t.Fatalf("Expected Kind 'Table', got '%v'", actualKind)
+				}
+			})
+		}
+	}
+}
+
 func TestTransform(t *testing.T) {
 	testNamespace := "test-transform"
 	tearDown, config, _, err := fixtures.StartDefaultServer(t)
@@ -2749,7 +2959,7 @@ func expectPartialObjectMetaV1EventsProtobuf(t *testing.T, r io.Reader, values .
 func TestClientsetShareTransport(t *testing.T) {
 	var counter int
 	var mu sync.Mutex
-	server := kubeapiservertesting.StartTestServerOrDie(t, nil, nil, framework.SharedEtcd())
+	server := kubeapiservertesting.StartTestServerOrDie(t, nil, framework.DefaultTestServerFlags(), framework.SharedEtcd())
 	defer server.TearDownFn()
 
 	dialFn := func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -2806,7 +3016,7 @@ func TestClientsetShareTransport(t *testing.T) {
 }
 
 func TestDedupOwnerReferences(t *testing.T) {
-	server := kubeapiservertesting.StartTestServerOrDie(t, nil, nil, framework.SharedEtcd())
+	server := kubeapiservertesting.StartTestServerOrDie(t, nil, framework.DefaultTestServerFlags(), framework.SharedEtcd())
 	defer server.TearDownFn()
 	etcd.CreateTestCRDs(t, apiextensionsclient.NewForConfigOrDie(server.ClientConfig), false, etcd.GetCustomResourceDefinitionData()[0])
 
@@ -2929,6 +3139,327 @@ func TestDedupOwnerReferences(t *testing.T) {
 	}
 }
 
+func TestEmulatedStorageVersion(t *testing.T) {
+	validVap := &admissionregistrationv1.ValidatingAdmissionPolicy{
+		Spec: admissionregistrationv1.ValidatingAdmissionPolicySpec{
+			MatchConstraints: &admissionregistrationv1.MatchResources{
+				ResourceRules: []admissionregistrationv1.NamedRuleWithOperations{
+					{
+						ResourceNames: []string{"foo"},
+						RuleWithOperations: admissionregistrationv1.RuleWithOperations{
+							Operations: []admissionregistrationv1.OperationType{"CREATE"},
+							Rule: admissionregistrationv1.Rule{
+								APIGroups:   []string{"*"},
+								APIVersions: []string{"*"},
+								Resources:   []string{"*"},
+							},
+						},
+					},
+				},
+			},
+			Validations: []admissionregistrationv1.Validation{
+				{
+					Expression: "true",
+					Message:    "always valid",
+				},
+			},
+		},
+	}
+
+	type testCase struct {
+		name                   string
+		emulatedVersion        string
+		gvr                    schema.GroupVersionResource
+		object                 runtime.Object
+		expectedStorageVersion schema.GroupVersion
+	}
+	cases := []testCase{
+		{
+			name:            "vap after ga release",
+			emulatedVersion: "1.31",
+			gvr: schema.GroupVersionResource{
+				Group:    "admissionregistration.k8s.io",
+				Version:  "v1beta1",
+				Resource: "validatingadmissionpolicies",
+			},
+			object: validVap,
+			expectedStorageVersion: schema.GroupVersion{
+				Group:   "admissionregistration.k8s.io",
+				Version: "v1",
+			},
+		},
+	}
+
+	// Group cases by their emulated version
+	groupedCases := map[string][]testCase{}
+	for _, c := range cases {
+		groupedCases[c.emulatedVersion] = append(groupedCases[c.emulatedVersion], c)
+	}
+
+	for emulatedVersion, cases := range groupedCases {
+		t.Run(emulatedVersion, func(t *testing.T) {
+			server := kubeapiservertesting.StartTestServerOrDie(
+				t, nil, []string{"--emulated-version=kube=" + emulatedVersion, `--storage-media-type=application/json`}, framework.SharedEtcd())
+			defer server.TearDownFn()
+
+			client := clientset.NewForConfigOrDie(server.ClientConfig)
+			dynamicClient := dynamic.NewForConfigOrDie(server.ClientConfig)
+
+			// create test namespace
+			testNamespace := "test-emulated-storage-version"
+			_, err := client.CoreV1().Namespaces().Create(context.TODO(), &v1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: testNamespace,
+				},
+			}, metav1.CreateOptions{})
+			if err != nil {
+				t.Fatalf("failed to create test ns: %v", err)
+			}
+
+			restMapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(client.Discovery()))
+
+			for i, c := range cases {
+				t.Run(c.name, func(t *testing.T) {
+					gvk, err := restMapper.KindFor(c.gvr)
+					if err != nil {
+						t.Fatalf("failed to get GVK: %v", err)
+					}
+					c.object.GetObjectKind().SetGroupVersionKind(gvk)
+
+					mapping, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+					if err != nil {
+						t.Fatalf("failed to get RESTMapping: %v", err)
+					} else if mapping.Resource != c.gvr {
+						t.Fatalf("expected resource %v, got %v", c.gvr, mapping.Resource)
+					}
+
+					asUnstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(c.object)
+					if err != nil {
+						t.Fatalf("failed to convert object to unstructured: %v", err)
+					}
+
+					uns := &unstructured.Unstructured{
+						Object: asUnstructured,
+					}
+					uns.SetName(fmt.Sprintf("test-object%d", i))
+
+					ns := testNamespace
+					if mapping.Scope.Name() == meta.RESTScopeNameRoot {
+						ns = ""
+					}
+
+					// create object
+					created, err := dynamicClient.Resource(c.gvr).Namespace(ns).Create(context.TODO(), uns, metav1.CreateOptions{})
+					if err != nil {
+						t.Fatalf("failed to create object: %v", err)
+					}
+
+					// Fetch object from ETCD
+					// Use this poor man's way to get the etcd path. This wont
+					// work for all resources, but should work for most we want
+					// to test against
+					resourcePrefix := mapping.Resource.Resource
+					if special, ok := kubeapiserver.SpecialDefaultResourcePrefixes[c.gvr.GroupResource()]; ok {
+						resourcePrefix = special
+					}
+					etcdPathComponents := []string{
+						"/",
+						server.EtcdStoragePrefix,
+						resourcePrefix,
+					}
+
+					if len(ns) > 0 {
+						etcdPathComponents = append(etcdPathComponents, ns)
+					}
+					etcdPathComponents = append(etcdPathComponents, created.GetName())
+					etcdPath := path.Join(etcdPathComponents...)
+					fetched, err := server.EtcdClient.Get(context.TODO(), etcdPath)
+					if err != nil {
+						t.Fatalf("failed to fetch object from etcd: %v", err)
+					} else if fetched.More || fetched.Count != 1 || len(fetched.Kvs) != 1 {
+						t.Fatalf("unexpected fetched response: %v", fetched)
+					}
+
+					storedObject := &metav1.PartialObjectMetadata{}
+					err = json.Unmarshal(fetched.Kvs[0].Value, storedObject)
+
+					if err != nil {
+						t.Fatalf("failed to decode object: %v", err)
+					} else if storedObject.GroupVersionKind().GroupVersion() != c.expectedStorageVersion {
+						t.Fatalf("expected storage version %s, got %s", c.expectedStorageVersion.String(), storedObject.GroupVersionKind().GroupVersion().String())
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestAllowedEmulationVersions tests the TestServer can start without problem for all allowed emulation versions.
+func TestAllowedEmulationVersions(t *testing.T) {
+	tcs := []struct {
+		name             string
+		emulationVersion string
+	}{
+		{
+			name:             "default",
+			emulationVersion: compatibility.DefaultKubeEffectiveVersionForTest().EmulationVersion().String(),
+		},
+	}
+
+	for _, tc := range tcs {
+		t.Run(tc.emulationVersion, func(t *testing.T) {
+			server := kubeapiservertesting.StartTestServerOrDie(t, nil,
+				[]string{fmt.Sprintf("--emulated-version=kube=%s", tc.emulationVersion)}, framework.SharedEtcd())
+			defer server.TearDownFn()
+
+			rt, err := restclient.TransportFor(server.ClientConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req, err := http.NewRequest("GET", server.ClientConfig.Host+"/", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := rt.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectedStatusCode := 200
+			if resp.StatusCode != expectedStatusCode {
+				t.Errorf("expect status code: %d, got : %d\n", expectedStatusCode, resp.StatusCode)
+			}
+			defer func() {
+				_ = resp.Body.Close()
+			}()
+		})
+	}
+}
+
+func TestEnableEmulationVersion(t *testing.T) {
+	featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.32"))
+	server := kubeapiservertesting.StartTestServerOrDie(t,
+		&kubeapiservertesting.TestServerInstanceOptions{BinaryVersion: "1.32"},
+		[]string{"--emulated-version=kube=1.31"}, framework.SharedEtcd())
+	defer server.TearDownFn()
+
+	rt, err := restclient.TransportFor(server.ClientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tcs := []struct {
+		path               string
+		expectedStatusCode int
+	}{
+		{
+			path:               "/",
+			expectedStatusCode: 200,
+		},
+		{
+			path:               "/apis/apps/v1/deployments",
+			expectedStatusCode: 200,
+		},
+		{
+			path:               "/apis/flowcontrol.apiserver.k8s.io/v1/flowschemas",
+			expectedStatusCode: 200,
+		},
+		{
+			path:               "/apis/flowcontrol.apiserver.k8s.io/v1beta1/flowschemas", // introduced at 1.20, removed at 1.26
+			expectedStatusCode: 404,
+		},
+		{
+			path:               "/apis/flowcontrol.apiserver.k8s.io/v1beta2/flowschemas", // introduced at 1.23, removed at 1.29
+			expectedStatusCode: 404,
+		},
+		{
+			path:               "/apis/flowcontrol.apiserver.k8s.io/v1beta3/flowschemas", // introduced at 1.26, removed at 1.32
+			expectedStatusCode: 200,
+		},
+	}
+
+	for _, tc := range tcs {
+		t.Run(tc.path, func(t *testing.T) {
+			req, err := http.NewRequest("GET", server.ClientConfig.Host+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := rt.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tc.expectedStatusCode {
+				t.Errorf("expect status code: %d, got : %d\n", tc.expectedStatusCode, resp.StatusCode)
+			}
+			defer func() {
+				_ = resp.Body.Close()
+			}()
+		})
+	}
+}
+
+func TestDisableEmulationVersion(t *testing.T) {
+	featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.32"))
+	server := kubeapiservertesting.StartTestServerOrDie(t,
+		&kubeapiservertesting.TestServerInstanceOptions{BinaryVersion: "1.32"},
+		[]string{}, framework.SharedEtcd())
+	defer server.TearDownFn()
+
+	rt, err := restclient.TransportFor(server.ClientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tcs := []struct {
+		path               string
+		expectedStatusCode int
+	}{
+		{
+			path:               "/",
+			expectedStatusCode: 200,
+		},
+		{
+			path:               "/apis/apps/v1/deployments",
+			expectedStatusCode: 200,
+		},
+		{
+			path:               "/apis/flowcontrol.apiserver.k8s.io/v1/flowschemas",
+			expectedStatusCode: 200,
+		},
+		{
+			path:               "/apis/flowcontrol.apiserver.k8s.io/v1beta1/flowschemas", // introduced at 1.20, removed at 1.26
+			expectedStatusCode: 404,
+		},
+		{
+			path:               "/apis/flowcontrol.apiserver.k8s.io/v1beta2/flowschemas", // introduced at 1.23, removed at 1.29
+			expectedStatusCode: 404,
+		},
+		{
+			path:               "/apis/flowcontrol.apiserver.k8s.io/v1beta3/flowschemas", // introduced at 1.26, removed at 1.32
+			expectedStatusCode: 404,
+		},
+	}
+
+	for _, tc := range tcs {
+		t.Run(tc.path, func(t *testing.T) {
+			req, err := http.NewRequest("GET", server.ClientConfig.Host+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := rt.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tc.expectedStatusCode {
+				t.Errorf("expect status code: %d, got : %d\n", tc.expectedStatusCode, resp.StatusCode)
+			}
+			defer func() {
+				_ = resp.Body.Close()
+			}()
+		})
+	}
+}
+
 type dependentClient struct {
 	t      *testing.T
 	client dynamic.ResourceInterface
@@ -3012,4 +3543,137 @@ func assertManagedFields(t *testing.T, obj *unstructured.Unstructured) {
 
 func int32Ptr(i int32) *int32 {
 	return &i
+}
+
+// TestDefaultStorageEncoding verifies that the storage encoding for all built-in resources is
+// Protobuf.
+func TestDefaultStorageEncoding(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, "AllAlpha", true)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, "AllBeta", true)
+
+	protobufRecognizer := protobuf.NewSerializer(runtime.NewScheme(), runtime.NewScheme())
+	var recognizersByGroup map[string]recognizer.RecognizingDecoder
+	{
+		jsonRecognizer := jsonserializer.NewSerializerWithOptions(jsonserializer.DefaultMetaFactory, runtime.NewScheme(), runtime.NewScheme(), jsonserializer.SerializerOptions{})
+		recognizersByGroup = map[string]recognizer.RecognizingDecoder{
+			// No new exceptions should be added. Once these groups begin using Protobuf
+			// for storage, the exception list should be removed.
+			"apiextensions.k8s.io":   jsonRecognizer,
+			"apiregistration.k8s.io": jsonRecognizer,
+		}
+	}
+
+	storageConfig := framework.SharedEtcd()
+	etcdPrefix := string(uuid.NewUUID())
+	storageConfig.Prefix = path.Join(etcdPrefix, "registry")
+	server := kubeapiservertesting.StartTestServerOrDie(
+		t,
+		kubeapiservertesting.NewDefaultTestServerOptions(),
+		[]string{
+			"--runtime-config=api/all=true",
+			"--disable-admission-plugins=ServiceAccount",
+		},
+		storageConfig,
+	)
+	t.Cleanup(server.TearDownFn)
+
+	client, err := clientset.NewForConfig(server.ClientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(server.ClientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	etcdClient, kvClient, err := integration.GetEtcdClients(storageConfig.Transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := etcdClient.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	const NamespaceName = "test-protobuf-default-storage-encoding"
+	if _, err := client.CoreV1().Namespaces().Create(context.TODO(), &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: NamespaceName}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	storageDataByResource := etcd.GetEtcdStorageDataForNamespace(NamespaceName)
+
+	_, lists, err := client.Discovery().ServerGroupsAndResources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, list := range lists {
+		for _, resource := range list.APIResources {
+			gv, err := schema.ParseGroupVersion(list.GroupVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resource.Group != "" {
+				gv.Group = resource.Group
+			}
+			if resource.Version != "" {
+				gv.Version = resource.Version
+			}
+
+			if strings.Contains(resource.Name, "/") {
+				continue
+			}
+
+			if !slices.Contains(resource.Verbs, "create") {
+				continue
+			}
+
+			gvr := gv.WithResource(resource.Name)
+
+			storageData := storageDataByResource[gvr]
+			if storageData.Stub == "" {
+				continue
+			}
+
+			name := fmt.Sprintf("%s.%s.%s", gvr.Resource, gvr.Version, gvr.Group)
+			if gvr.Group == "" {
+				name = fmt.Sprintf("%s.%s", gvr.Resource, gvr.Version)
+			}
+			t.Run(name, func(t *testing.T) {
+				var o unstructured.Unstructured
+				if err := utiljson.Unmarshal([]byte(storageData.Stub), &o.Object); err != nil {
+					t.Fatal(err)
+				}
+
+				resourceClient := dynamicClient.Resource(gvr).Namespace(NamespaceName)
+				if !resource.Namespaced {
+					resourceClient = dynamicClient.Resource(gvr)
+				}
+				if _, err := resourceClient.Create(context.TODO(), &o, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+
+				response, err := kvClient.Get(context.TODO(), path.Join("/", etcdPrefix, storageData.ExpectedEtcdPath))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if n := len(response.Kvs); n != 1 {
+					t.Fatalf("expected 1 kv, got %d", n)
+				}
+				recognizer, ok := recognizersByGroup[gvr.Group]
+				if !ok {
+					recognizer = protobufRecognizer
+				}
+				recognized, _, err := recognizer.RecognizesData(response.Kvs[0].Value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !recognized {
+					t.Fatal("stored object encoding not recognized as protobuf")
+				}
+			})
+		}
+	}
 }

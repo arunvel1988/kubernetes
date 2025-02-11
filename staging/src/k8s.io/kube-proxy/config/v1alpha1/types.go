@@ -213,13 +213,13 @@ type KubeProxyConfiguration struct {
 	// winkernel contains winkernel-related configuration options.
 	Winkernel KubeProxyWinkernelConfiguration `json:"winkernel"`
 
-	// detectLocalMode determines mode to use for detecting local traffic, defaults to LocalModeClusterCIDR
+	// detectLocalMode determines mode to use for detecting local traffic, defaults to ClusterCIDR
 	DetectLocalMode LocalMode `json:"detectLocalMode"`
 	// detectLocal contains optional configuration settings related to DetectLocalMode.
 	DetectLocal DetectLocalConfiguration `json:"detectLocal"`
 	// clusterCIDR is the CIDR range of the pods in the cluster. (For dual-stack
 	// clusters, this can be a comma-separated dual-stack pair of CIDR ranges.). When
-	// DetectLocalMode is set to LocalModeClusterCIDR, kube-proxy will consider
+	// DetectLocalMode is set to ClusterCIDR, kube-proxy will consider
 	// traffic to be local if its source IP is in this range. (Otherwise it is not
 	// used.)
 	ClusterCIDR string `json:"clusterCIDR"`
@@ -243,14 +243,17 @@ type KubeProxyConfiguration struct {
 
 	// portRange was previously used to configure the userspace proxy, but is now unused.
 	PortRange string `json:"portRange"`
+
+	// windowsRunAsService, if true, enables Windows service control manager API integration.
+	WindowsRunAsService bool `json:"windowsRunAsService,omitempty"`
 }
 
 // ProxyMode represents modes used by the Kubernetes proxy server.
 //
-// Currently, two modes of proxy are available on Linux platforms: 'iptables' and 'ipvs'.
-// One mode of proxy is available on Windows platforms: 'kernelspace'.
+// Three modes of proxy are available on Linux platforms: `iptables`, `ipvs`, and
+// `nftables`. One mode of proxy is available on Windows platforms: `kernelspace`.
 //
-// If the proxy mode is unspecified, the best-available proxy mode will be used (currently this
+// If the proxy mode is unspecified, a default proxy mode will be used (currently this
 // is `iptables` on Linux and `kernelspace` on Windows). If the selected proxy mode cannot be
 // used (due to lack of kernel support, missing userspace components, etc) then kube-proxy
 // will exit with an error.

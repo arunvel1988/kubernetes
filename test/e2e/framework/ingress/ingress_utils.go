@@ -560,7 +560,7 @@ func DescribeIng(ns string) {
 	framework.Logf("\nOutput of kubectl describe ing:\n")
 	desc, _ := e2ekubectl.RunKubectl(
 		ns, "describe", "ing")
-	framework.Logf(desc)
+	framework.Logf("%s", desc)
 }
 
 // Update retrieves the ingress, performs the passed function, and then updates it.
@@ -775,7 +775,7 @@ func (j *TestJig) WaitForIngress(ctx context.Context, waitForNodePort bool) {
 
 // WaitForIngressToStable waits for the LB return 100 consecutive 200 responses.
 func (j *TestJig) WaitForIngressToStable(ctx context.Context) {
-	if err := wait.PollWithContext(ctx, 10*time.Second, e2eservice.GetServiceLoadBalancerPropagationTimeout(ctx, j.Client), func(ctx context.Context) (bool, error) {
+	if err := wait.PollUntilContextTimeout(ctx, 10*time.Second, e2eservice.GetServiceLoadBalancerPropagationTimeout(ctx, j.Client), false, func(ctx context.Context) (bool, error) {
 		_, err := j.GetDistinctResponseFromIngress(ctx)
 		if err != nil {
 			return false, nil
@@ -829,7 +829,7 @@ func (j *TestJig) VerifyURL(ctx context.Context, route, host string, iterations 
 	for i := 0; i < iterations; i++ {
 		b, err := SimpleGET(ctx, httpClient, route, host)
 		if err != nil {
-			framework.Logf(b)
+			framework.Logf("%s", b)
 			return err
 		}
 		j.Logger.Infof("Verified %v with host %v %d times, sleeping for %v", route, host, i, interval)

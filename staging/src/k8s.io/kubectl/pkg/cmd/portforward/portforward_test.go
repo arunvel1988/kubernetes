@@ -32,7 +32,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/rest/fake"
+	"k8s.io/client-go/tools/portforward"
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
+	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/scheme"
 )
 
@@ -818,6 +820,24 @@ func TestConvertPodNamedPortToNumber(t *testing.T) {
 			ports: []string{"https", "http"},
 			err:   true,
 		},
+		{
+			name: "empty port name",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Ports: []corev1.ContainerPort{
+								{
+									ContainerPort: int32(27017)},
+							},
+						},
+					},
+				},
+			},
+			ports:     []string{"28015:"},
+			converted: nil,
+			err:       true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -981,5 +1001,40 @@ func TestCheckUDPPort(t *testing.T) {
 		if tc.expectError {
 			t.Errorf("%v: unexpected success", tc.name)
 		}
+	}
+}
+
+func TestCreateDialer(t *testing.T) {
+	url, err := url.Parse("http://localhost:8080/index.html")
+	if err != nil {
+		t.Fatalf("unable to parse test url: %v", err)
+	}
+	config := cmdtesting.DefaultClientConfig()
+	opts := PortForwardOptions{Config: config}
+	// First, ensure that no environment variable creates the fallback dialer.
+	dialer, err := createDialer("GET", url, opts)
+	if err != nil {
+		t.Fatalf("unable to create dialer: %v", err)
+	}
+	if _, isFallback := dialer.(*portforward.FallbackDialer); !isFallback {
+		t.Errorf("expected fallback dialer, got %#v", dialer)
+	}
+	// Next, check turning on feature flag explicitly also creates fallback dialer.
+	t.Setenv(string(cmdutil.PortForwardWebsockets), "true")
+	dialer, err = createDialer("GET", url, opts)
+	if err != nil {
+		t.Fatalf("unable to create dialer: %v", err)
+	}
+	if _, isFallback := dialer.(*portforward.FallbackDialer); !isFallback {
+		t.Errorf("expected fallback dialer, got %#v", dialer)
+	}
+	// Finally, check explicit disabling does NOT create the fallback dialer.
+	t.Setenv(string(cmdutil.PortForwardWebsockets), "false")
+	dialer, err = createDialer("GET", url, opts)
+	if err != nil {
+		t.Fatalf("unable to create dialer: %v", err)
+	}
+	if _, isFallback := dialer.(*portforward.FallbackDialer); isFallback {
+		t.Errorf("expected fallback dialer, got %#v", dialer)
 	}
 }

@@ -80,7 +80,7 @@ var _ = SIGDescribe("CronJob", func() {
 
 		ginkgo.By("Ensuring at least two running jobs exists by listing jobs explicitly")
 		jobs, err := f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(ctx, metav1.ListOptions{})
-		framework.ExpectNoError(err, "Failed to list the CronJobs in namespace %s", f.Namespace.Name)
+		framework.ExpectNoError(err, "Failed to list jobs in namespace %s", f.Namespace.Name)
 		activeJobs, _ := filterActiveJobs(jobs)
 		gomega.Expect(len(activeJobs)).To(gomega.BeNumerically(">=", 2))
 
@@ -109,7 +109,7 @@ var _ = SIGDescribe("CronJob", func() {
 
 		ginkgo.By("Ensuring no job exists by listing jobs explicitly")
 		jobs, err := f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(ctx, metav1.ListOptions{})
-		framework.ExpectNoError(err, "Failed to list the CronJobs in namespace %s", f.Namespace.Name)
+		framework.ExpectNoError(err, "Failed to list jobs in namespace %s", f.Namespace.Name)
 		gomega.Expect(jobs.Items).To(gomega.BeEmpty())
 
 		ginkgo.By("Removing cronjob")
@@ -140,7 +140,7 @@ var _ = SIGDescribe("CronJob", func() {
 
 		ginkgo.By("Ensuring exactly one running job exists by listing jobs explicitly")
 		jobs, err := f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(ctx, metav1.ListOptions{})
-		framework.ExpectNoError(err, "Failed to list the CronJobs in namespace %s", f.Namespace.Name)
+		framework.ExpectNoError(err, "Failed to list jobs in namespace %s", f.Namespace.Name)
 		activeJobs, _ := filterActiveJobs(jobs)
 		gomega.Expect(activeJobs).To(gomega.HaveLen(1))
 
@@ -213,7 +213,7 @@ var _ = SIGDescribe("CronJob", func() {
 
 		ginkgo.By("Ensuring at least one running jobs exists by listing jobs explicitly")
 		jobs, err := f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(ctx, metav1.ListOptions{})
-		framework.ExpectNoError(err, "Failed to list the CronJobs in namespace %s", f.Namespace.Name)
+		framework.ExpectNoError(err, "Failed to list jobs in namespace %s", f.Namespace.Name)
 		activeJobs, _ := filterActiveJobs(jobs)
 		gomega.Expect(activeJobs).ToNot(gomega.BeEmpty())
 
@@ -255,6 +255,31 @@ var _ = SIGDescribe("CronJob", func() {
 			}
 			return nil, nil
 		}))
+
+		ginkgo.By("Removing cronjob")
+		err = deleteCronJob(ctx, f.ClientSet, f.Namespace.Name, cronJob.Name)
+		framework.ExpectNoError(err, "Failed to delete CronJob %s in namespace %s", cronJob.Name, f.Namespace.Name)
+	})
+
+	ginkgo.It("should set the cronjob-scheduled-timestamp annotation on a job", func(ctx context.Context) {
+		ginkgo.By("Creating a cronjob")
+		cronJob := newTestCronJob("concurrent", "*/1 * * * ?", batchv1.AllowConcurrent,
+			nil, nil, nil)
+		cronJob, err := createCronJob(ctx, f.ClientSet, f.Namespace.Name, cronJob)
+		framework.ExpectNoError(err, "Failed to create CronJob in namespace %s", f.Namespace.Name)
+
+		ginkgo.By("Ensuring CronJobsScheduledAnnotation annotation exists on the newely created job")
+		err = waitForJobsAtLeast(ctx, f.ClientSet, f.Namespace.Name, 1)
+		framework.ExpectNoError(err, "Failed to ensure a job exists in namespace %s", f.Namespace.Name)
+
+		jobs, err := f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(ctx, metav1.ListOptions{})
+		framework.ExpectNoError(err, "Failed to list jobs in namespace %s", f.Namespace.Name)
+		gomega.Expect(jobs.Items[0].Annotations).Should(gomega.HaveKey(batchv1.CronJobScheduledTimestampAnnotation),
+			"missing cronjob-scheduled-timestamp annotation")
+		ginkgo.By("Ensuring CronJobsScheduledAnnotation annotation parses to RFC3339")
+		timeAnnotation := jobs.Items[0].Annotations[batchv1.CronJobScheduledTimestampAnnotation]
+		_, err = time.Parse(time.RFC3339, timeAnnotation)
+		framework.ExpectNoError(err, "Failed to parse cronjob-scheduled-timestamp annotation: %q", timeAnnotation)
 
 		ginkgo.By("Removing cronjob")
 		err = deleteCronJob(ctx, f.ClientSet, f.Namespace.Name, cronJob.Name)
@@ -622,7 +647,7 @@ func deleteCronJob(ctx context.Context, c clientset.Interface, ns, name string) 
 
 // Wait for at least given amount of active jobs.
 func waitForActiveJobs(ctx context.Context, c clientset.Interface, ns, cronJobName string, active int) error {
-	return wait.PollWithContext(ctx, framework.Poll, cronJobTimeout, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, framework.Poll, cronJobTimeout, false, func(ctx context.Context) (bool, error) {
 		curr, err := getCronJob(ctx, c, ns, cronJobName)
 		if err != nil {
 			return false, err
@@ -633,7 +658,7 @@ func waitForActiveJobs(ctx context.Context, c clientset.Interface, ns, cronJobNa
 
 // Wait till a given job actually goes away from the Active list for a given cronjob
 func waitForJobNotActive(ctx context.Context, c clientset.Interface, ns, cronJobName, jobName string) error {
-	return wait.PollWithContext(ctx, framework.Poll, cronJobTimeout, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, framework.Poll, cronJobTimeout, false, func(ctx context.Context) (bool, error) {
 		curr, err := getCronJob(ctx, c, ns, cronJobName)
 		if err != nil {
 			return false, err
@@ -650,7 +675,7 @@ func waitForJobNotActive(ctx context.Context, c clientset.Interface, ns, cronJob
 
 // Wait for a job to disappear by listing them explicitly.
 func waitForJobToDisappear(ctx context.Context, c clientset.Interface, ns string, targetJob *batchv1.Job) error {
-	return wait.PollWithContext(ctx, framework.Poll, cronJobTimeout, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, framework.Poll, cronJobTimeout, false, func(ctx context.Context) (bool, error) {
 		jobs, err := c.BatchV1().Jobs(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return false, err
@@ -667,7 +692,7 @@ func waitForJobToDisappear(ctx context.Context, c clientset.Interface, ns string
 
 // Wait for a pod to disappear by listing them explicitly.
 func waitForJobsPodToDisappear(ctx context.Context, c clientset.Interface, ns string, targetJob *batchv1.Job) error {
-	return wait.PollWithContext(ctx, framework.Poll, cronJobTimeout, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, framework.Poll, cronJobTimeout, false, func(ctx context.Context) (bool, error) {
 		options := metav1.ListOptions{LabelSelector: fmt.Sprintf("controller-uid=%s", targetJob.UID)}
 		pods, err := c.CoreV1().Pods(ns).List(ctx, options)
 		if err != nil {
@@ -679,7 +704,7 @@ func waitForJobsPodToDisappear(ctx context.Context, c clientset.Interface, ns st
 
 // Wait for a job to be replaced with a new one.
 func waitForJobReplaced(ctx context.Context, c clientset.Interface, ns, previousJobName string) error {
-	return wait.PollWithContext(ctx, framework.Poll, cronJobTimeout, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, framework.Poll, cronJobTimeout, false, func(ctx context.Context) (bool, error) {
 		jobs, err := c.BatchV1().Jobs(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return false, err
@@ -698,7 +723,7 @@ func waitForJobReplaced(ctx context.Context, c clientset.Interface, ns, previous
 
 // waitForJobsAtLeast waits for at least a number of jobs to appear.
 func waitForJobsAtLeast(ctx context.Context, c clientset.Interface, ns string, atLeast int) error {
-	return wait.PollWithContext(ctx, framework.Poll, cronJobTimeout, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, framework.Poll, cronJobTimeout, false, func(ctx context.Context) (bool, error) {
 		jobs, err := c.BatchV1().Jobs(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return false, err
@@ -709,7 +734,7 @@ func waitForJobsAtLeast(ctx context.Context, c clientset.Interface, ns string, a
 
 // waitForAnyFinishedJob waits for any completed job to appear.
 func waitForAnyFinishedJob(ctx context.Context, c clientset.Interface, ns string) error {
-	return wait.PollWithContext(ctx, framework.Poll, cronJobTimeout, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, framework.Poll, cronJobTimeout, false, func(ctx context.Context) (bool, error) {
 		jobs, err := c.BatchV1().Jobs(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return false, err
@@ -725,7 +750,7 @@ func waitForAnyFinishedJob(ctx context.Context, c clientset.Interface, ns string
 
 // waitForEventWithReason waits for events with a reason within a list has occurred
 func waitForEventWithReason(ctx context.Context, c clientset.Interface, ns, cronJobName string, reasons []string) error {
-	return wait.PollWithContext(ctx, framework.Poll, 30*time.Second, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, framework.Poll, 30*time.Second, false, func(ctx context.Context) (bool, error) {
 		sj, err := getCronJob(ctx, c, ns, cronJobName)
 		if err != nil {
 			return false, err

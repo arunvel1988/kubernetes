@@ -18,6 +18,7 @@ package devicemanager
 
 import (
 	"context"
+	goerrors "errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,18 +34,22 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	errorsutil "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apiserver/pkg/server/healthz"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
 	"k8s.io/kubernetes/pkg/kubelet/cm/containermap"
 	"k8s.io/kubernetes/pkg/kubelet/cm/devicemanager/checkpoint"
 	plugin "k8s.io/kubernetes/pkg/kubelet/cm/devicemanager/plugin/v1beta1"
+	"k8s.io/kubernetes/pkg/kubelet/cm/resourceupdates"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager"
 	"k8s.io/kubernetes/pkg/kubelet/config"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
 	"k8s.io/kubernetes/pkg/kubelet/pluginmanager/cache"
-	"k8s.io/kubernetes/pkg/kubelet/types"
 	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
@@ -97,9 +102,6 @@ type ManagerImpl struct {
 	// init containers.
 	devicesToReuse PodReusableDevices
 
-	// pendingAdmissionPod contain the pod during the admission phase
-	pendingAdmissionPod *v1.Pod
-
 	// containerMap provides a mapping from (pod, container) -> containerID
 	// for all containers in a pod. Used to detect pods running across a restart
 	containerMap containermap.ContainerMap
@@ -108,6 +110,9 @@ type ManagerImpl struct {
 	// was reported running by the container runtime when `containerMap` was computed.
 	// Used to detect pods running across a restart
 	containerRunningSet sets.Set[string]
+
+	// update channel for device health updates
+	update chan resourceupdates.Update
 }
 
 type endpointInfo struct {
@@ -151,6 +156,7 @@ func newManagerImpl(socketPath string, topology []cadvisorapi.Node, topologyAffi
 		numaNodes:             numaNodes,
 		topologyAffinityStore: topologyAffinityStore,
 		devicesToReuse:        make(PodReusableDevices),
+		update:                make(chan resourceupdates.Update, 100),
 	}
 
 	server, err := plugin.NewServer(socketPath, manager, manager)
@@ -172,6 +178,10 @@ func newManagerImpl(socketPath string, topology []cadvisorapi.Node, topologyAffi
 	manager.checkpointManager = checkpointManager
 
 	return manager, nil
+}
+
+func (m *ManagerImpl) Updates() <-chan resourceupdates.Update {
+	return m.update
 }
 
 // CleanupPluginDirectory is to remove all existing unix sockets
@@ -262,8 +272,30 @@ func (m *ManagerImpl) genericDeviceUpdateCallback(resourceName string, devices [
 	m.mutex.Lock()
 	m.healthyDevices[resourceName] = sets.New[string]()
 	m.unhealthyDevices[resourceName] = sets.New[string]()
+	oldDevices := m.allDevices[resourceName]
+	podsToUpdate := sets.New[string]()
 	m.allDevices[resourceName] = make(map[string]pluginapi.Device)
 	for _, dev := range devices {
+
+		if utilfeature.DefaultFeatureGate.Enabled(features.ResourceHealthStatus) {
+			// compare with old device's health and send update to the channel if needed
+			updatePodUIDFn := func(deviceID string) {
+				podUID, _ := m.podDevices.getPodAndContainerForDevice(deviceID)
+				if podUID != "" {
+					podsToUpdate.Insert(podUID)
+				}
+			}
+			if oldDev, ok := oldDevices[dev.ID]; ok {
+				if oldDev.Health != dev.Health {
+					updatePodUIDFn(dev.ID)
+				}
+			} else {
+				// if this is a new device, it might have existed before and disappeared for a while
+				// but still be assigned to a Pod. In this case, we need to send an update to the channel
+				updatePodUIDFn(dev.ID)
+			}
+		}
+
 		m.allDevices[resourceName][dev.ID] = dev
 		if dev.Health == pluginapi.Healthy {
 			m.healthyDevices[resourceName].Insert(dev.ID)
@@ -273,6 +305,17 @@ func (m *ManagerImpl) genericDeviceUpdateCallback(resourceName string, devices [
 		}
 	}
 	m.mutex.Unlock()
+
+	if utilfeature.DefaultFeatureGate.Enabled(features.ResourceHealthStatus) {
+		if len(podsToUpdate) > 0 {
+			select {
+			case m.update <- resourceupdates.Update{PodUIDs: podsToUpdate.UnsortedList()}:
+			default:
+				klog.ErrorS(goerrors.New("device update channel is full"), "discard pods info", "podsToUpdate", podsToUpdate.UnsortedList())
+			}
+		}
+	}
+
 	if err := m.writeCheckpoint(); err != nil {
 		klog.ErrorS(err, "Writing checkpoint encountered")
 	}
@@ -281,6 +324,11 @@ func (m *ManagerImpl) genericDeviceUpdateCallback(resourceName string, devices [
 
 // GetWatcherHandler returns the plugin handler
 func (m *ManagerImpl) GetWatcherHandler() cache.PluginHandler {
+	return m.server
+}
+
+// GetHealthChecker returns the plugin handler
+func (m *ManagerImpl) GetHealthChecker() healthz.HealthChecker {
 	return m.server
 }
 
@@ -303,7 +351,7 @@ func (m *ManagerImpl) Start(activePods ActivePodsFunc, sourcesReady config.Sourc
 	// Loads in allocatedDevices information from disk.
 	err := m.readCheckpoint()
 	if err != nil {
-		klog.InfoS("Continue after failing to read checkpoint file. Device allocation info may NOT be up-to-date", "err", err)
+		klog.ErrorS(err, "Continue after failing to read checkpoint file. Device allocation info may NOT be up-to-date")
 	}
 
 	return m.server.Start()
@@ -319,10 +367,6 @@ func (m *ManagerImpl) Stop() error {
 // Allocate is the call that you can use to allocate a set of devices
 // from the registered device plugins.
 func (m *ManagerImpl) Allocate(pod *v1.Pod, container *v1.Container) error {
-	// The pod is during the admission phase. We need to save the pod to avoid it
-	// being cleaned before the admission ended
-	m.setPodPendingAdmission(pod)
-
 	if _, ok := m.devicesToReuse[string(pod.UID)]; !ok {
 		m.devicesToReuse[string(pod.UID)] = make(map[string]sets.Set[string])
 	}
@@ -340,7 +384,7 @@ func (m *ManagerImpl) Allocate(pod *v1.Pod, container *v1.Container) error {
 			if err := m.allocateContainerResources(pod, container, m.devicesToReuse[string(pod.UID)]); err != nil {
 				return err
 			}
-			if !types.IsRestartableInitContainer(&initContainer) {
+			if !podutil.IsRestartableInitContainer(&initContainer) {
 				m.podDevices.addContainerAllocatedResources(string(pod.UID), container.Name, m.devicesToReuse[string(pod.UID)])
 			} else {
 				// If the init container is restartable, we need to keep the
@@ -409,7 +453,7 @@ func (m *ManagerImpl) GetCapacity() (v1.ResourceList, v1.ResourceList, []string)
 			// should always be consistent. Otherwise, we run with the risk
 			// of failing to garbage collect non-existing resources or devices.
 			if !ok {
-				klog.ErrorS(nil, "Unexpected: healthyDevices and endpoints are out of sync")
+				klog.InfoS("Unexpected: healthyDevices and endpoints are out of sync")
 			}
 			delete(m.endpoints, resourceName)
 			delete(m.healthyDevices, resourceName)
@@ -424,7 +468,7 @@ func (m *ManagerImpl) GetCapacity() (v1.ResourceList, v1.ResourceList, []string)
 		eI, ok := m.endpoints[resourceName]
 		if (ok && eI.e.stopGracePeriodExpired()) || !ok {
 			if !ok {
-				klog.ErrorS(nil, "Unexpected: unhealthyDevices and endpoints are out of sync")
+				klog.InfoS("Unexpected: unhealthyDevices and endpoints became out of sync")
 			}
 			delete(m.endpoints, resourceName)
 			delete(m.unhealthyDevices, resourceName)
@@ -440,7 +484,7 @@ func (m *ManagerImpl) GetCapacity() (v1.ResourceList, v1.ResourceList, []string)
 	m.mutex.Unlock()
 	if needsUpdateCheckpoint {
 		if err := m.writeCheckpoint(); err != nil {
-			klog.ErrorS(err, "Error on writing checkpoint")
+			klog.ErrorS(err, "Failed to write checkpoint file")
 		}
 	}
 	return capacity, allocatable, deletedResources.UnsortedList()
@@ -459,9 +503,10 @@ func (m *ManagerImpl) writeCheckpoint() error {
 	err := m.checkpointManager.CreateCheckpoint(kubeletDeviceManagerCheckpoint, data)
 	if err != nil {
 		err2 := fmt.Errorf("failed to write checkpoint file %q: %v", kubeletDeviceManagerCheckpoint, err)
-		klog.InfoS("Failed to write checkpoint file", "err", err)
+		klog.ErrorS(err, "Failed to write checkpoint file")
 		return err2
 	}
+	klog.V(4).InfoS("Checkpoint file written", "checkpoint", kubeletDeviceManagerCheckpoint)
 	return nil
 }
 
@@ -472,7 +517,7 @@ func (m *ManagerImpl) readCheckpoint() error {
 	if err != nil {
 		if err == errors.ErrCheckpointNotFound {
 			// no point in trying anything else
-			klog.InfoS("Failed to read data from checkpoint", "checkpoint", kubeletDeviceManagerCheckpoint, "err", err)
+			klog.ErrorS(err, "Failed to read data from checkpoint", "checkpoint", kubeletDeviceManagerCheckpoint)
 			return nil
 		}
 		return err
@@ -490,6 +535,8 @@ func (m *ManagerImpl) readCheckpoint() error {
 		m.unhealthyDevices[resource] = sets.New[string]()
 		m.endpoints[resource] = endpointInfo{e: newStoppedEndpointImpl(resource), opts: nil}
 	}
+
+	klog.V(4).InfoS("Read data from checkpoint file", "checkpoint", kubeletDeviceManagerCheckpoint)
 	return nil
 }
 
@@ -503,20 +550,14 @@ func (m *ManagerImpl) getCheckpoint() (checkpoint.DeviceManagerCheckpoint, error
 
 // UpdateAllocatedDevices frees any Devices that are bound to terminated pods.
 func (m *ManagerImpl) UpdateAllocatedDevices() {
+	activePods := m.activePods()
 	if !m.sourcesReady.AllReady() {
 		return
 	}
-
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-
-	activeAndAdmittedPods := m.activePods()
-	if m.pendingAdmissionPod != nil {
-		activeAndAdmittedPods = append(activeAndAdmittedPods, m.pendingAdmissionPod)
-	}
-
 	podsToBeRemoved := m.podDevices.pods()
-	for _, pod := range activeAndAdmittedPods {
+	for _, pod := range activePods {
 		podsToBeRemoved.Delete(string(pod.UID))
 	}
 	if len(podsToBeRemoved) <= 0 {
@@ -558,7 +599,7 @@ func (m *ManagerImpl) devicesToAllocate(podUID, contName, resource string, requi
 	// running, then it can only be a kubelet restart. On node reboot the runtime and the containers were also shut down. Then, if the container was running, it can only be
 	// because it already has access to all the required devices, so we got nothing to do and we can bail out.
 	if !m.sourcesReady.AllReady() && m.isContainerAlreadyRunning(podUID, contName) {
-		klog.V(3).InfoS("container detected running, nothing to do", "deviceNumber", needed, "resourceName", resource, "podUID", podUID, "containerName", contName)
+		klog.V(3).InfoS("Container detected running, nothing to do", "deviceNumber", needed, "resourceName", resource, "podUID", podUID, "containerName", contName)
 		return nil, nil
 	}
 
@@ -589,7 +630,7 @@ func (m *ManagerImpl) devicesToAllocate(podUID, contName, resource string, requi
 	// We handled the known error paths in scenario 3 (node reboot), so from now on we can fall back in a common path.
 	// We cover container restart on kubelet steady state with the same flow.
 	if needed == 0 {
-		klog.V(3).InfoS("no devices needed, nothing to do", "deviceNumber", needed, "resourceName", resource, "podUID", podUID, "containerName", contName)
+		klog.V(3).InfoS("No devices needed, nothing to do", "deviceNumber", needed, "resourceName", resource, "podUID", podUID, "containerName", contName)
 		// No change, no work.
 		return nil, nil
 	}
@@ -798,7 +839,7 @@ func (m *ManagerImpl) allocateContainerResources(pod *v1.Pod, container *v1.Cont
 	for k, v := range container.Resources.Limits {
 		resource := string(k)
 		needed := int(v.Value())
-		klog.V(3).InfoS("Looking for needed resources", "needed", needed, "resourceName", resource)
+		klog.V(3).InfoS("Looking for needed resources", "resourceName", resource, "pod", klog.KObj(pod), "containerName", container.Name, "needed", needed)
 		if !m.isDevicePluginResource(resource) {
 			continue
 		}
@@ -844,7 +885,7 @@ func (m *ManagerImpl) allocateContainerResources(pod *v1.Pod, container *v1.Cont
 		devs := allocDevices.UnsortedList()
 		// TODO: refactor this part of code to just append a ContainerAllocationRequest
 		// in a passed in AllocateRequest pointer, and issues a single Allocate call per pod.
-		klog.V(3).InfoS("Making allocation request for device plugin", "devices", devs, "resourceName", resource)
+		klog.V(4).InfoS("Making allocation request for device plugin", "devices", devs, "resourceName", resource, "pod", klog.KObj(pod), "containerName", container.Name)
 		resp, err := eI.e.allocate(devs)
 		metrics.DevicePluginAllocationDuration.WithLabelValues(resource).Observe(metrics.SinceInSeconds(startRPCTime))
 		if err != nil {
@@ -914,7 +955,7 @@ func (m *ManagerImpl) GetDeviceRunContainerOptions(pod *v1.Pod, container *v1.Co
 		}
 
 		if !m.checkPodActive(pod) {
-			klog.ErrorS(nil, "pod deleted from activePods, skip to reAllocate", "podUID", podUID)
+			klog.V(5).InfoS("Pod deleted from activePods, skip to reAllocate", "pod", klog.KObj(pod), "podUID", podUID, "containerName", container.Name)
 			continue
 		}
 
@@ -946,7 +987,7 @@ func (m *ManagerImpl) callPreStartContainerIfNeeded(podUID, contName, resource s
 
 	if eI.opts == nil || !eI.opts.PreStartRequired {
 		m.mutex.Unlock()
-		klog.V(4).InfoS("Plugin options indicate to skip PreStartContainer for resource", "resourceName", resource)
+		klog.V(5).InfoS("Plugin options indicate to skip PreStartContainer for resource", "podUID", podUID, "resourceName", resource, "containerName", contName)
 		return nil
 	}
 
@@ -976,12 +1017,12 @@ func (m *ManagerImpl) callGetPreferredAllocationIfAvailable(podUID, contName, re
 	}
 
 	if eI.opts == nil || !eI.opts.GetPreferredAllocationAvailable {
-		klog.V(4).InfoS("Plugin options indicate to skip GetPreferredAllocation for resource", "resourceName", resource)
+		klog.V(5).InfoS("Plugin options indicate to skip GetPreferredAllocation for resource", "resourceName", resource, "podUID", podUID, "containerName", contName)
 		return nil, nil
 	}
 
 	m.mutex.Unlock()
-	klog.V(4).InfoS("Issuing a GetPreferredAllocation call for container", "containerName", contName, "podUID", podUID)
+	klog.V(4).InfoS("Issuing a GetPreferredAllocation call for container", "resourceName", resource, "containerName", contName, "podUID", podUID)
 	resp, err := eI.e.getPreferredAllocation(available.UnsortedList(), mustInclude.UnsortedList(), size)
 	m.mutex.Lock()
 	if err != nil {
@@ -1051,6 +1092,70 @@ func (m *ManagerImpl) GetDevices(podUID, containerName string) ResourceDeviceIns
 	return m.podDevices.getContainerDevices(podUID, containerName)
 }
 
+func (m *ManagerImpl) UpdateAllocatedResourcesStatus(pod *v1.Pod, status *v1.PodStatus) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	// Today we ignore edge cases that are not likely to happen:
+	//  - update statuses for containers that are in spec, but not in status
+	//  - update statuses for resources requested in spec, but with no information in podDevices
+	for i, containerStatus := range status.ContainerStatuses {
+		devices := m.podDevices.getContainerDevices(string(pod.UID), containerStatus.Name)
+
+		for resourceName, deviceInstances := range devices {
+			for id, d := range deviceInstances {
+				health := pluginapi.Healthy
+				// this is unlikely, but check for existence here anyways
+				if r, ok := m.allDevices[resourceName]; ok {
+					if _, ok := r[id]; ok {
+						health = m.allDevices[resourceName][id].Health
+					}
+				}
+
+				d.Health = health
+
+				deviceInstances[id] = d
+			}
+		}
+
+		for resourceName, dI := range devices {
+			resourceStatus := v1.ResourceStatus{
+				Name:      v1.ResourceName(resourceName),
+				Resources: []v1.ResourceHealth{},
+			}
+
+			for id, d := range dI {
+				health := v1.ResourceHealthStatusHealthy
+				if d.Health != pluginapi.Healthy {
+					health = v1.ResourceHealthStatusUnhealthy
+				}
+				resourceStatus.Resources = append(resourceStatus.Resources, v1.ResourceHealth{
+					ResourceID: v1.ResourceID(id),
+					Health:     health,
+				})
+			}
+
+			if status.ContainerStatuses[i].AllocatedResourcesStatus == nil {
+				status.ContainerStatuses[i].AllocatedResourcesStatus = []v1.ResourceStatus{}
+			}
+
+			// look up the resource status by name and update it
+			found := false
+			for j, rs := range status.ContainerStatuses[i].AllocatedResourcesStatus {
+				if rs.Name == resourceStatus.Name {
+					status.ContainerStatuses[i].AllocatedResourcesStatus[j] = resourceStatus
+					found = true
+					break
+				}
+			}
+
+			if !found {
+				status.ContainerStatuses[i].AllocatedResourcesStatus = append(status.ContainerStatuses[i].AllocatedResourcesStatus, resourceStatus)
+			}
+		}
+	}
+}
+
 // ShouldResetExtendedResourceCapacity returns whether the extended resources should be zeroed or not,
 // depending on whether the node has been recreated. Absence of the checkpoint file strongly indicates the node
 // has been recreated.
@@ -1062,17 +1167,10 @@ func (m *ManagerImpl) ShouldResetExtendedResourceCapacity() bool {
 	return len(checkpoints) == 0
 }
 
-func (m *ManagerImpl) setPodPendingAdmission(pod *v1.Pod) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	m.pendingAdmissionPod = pod
-}
-
 func (m *ManagerImpl) isContainerAlreadyRunning(podUID, cntName string) bool {
 	cntID, err := m.containerMap.GetContainerID(podUID, cntName)
 	if err != nil {
-		klog.V(4).InfoS("container not found in the initial map, assumed NOT running", "podUID", podUID, "containerName", cntName, "err", err)
+		klog.ErrorS(err, "Container not found in the initial map, assumed NOT running", "podUID", podUID, "containerName", cntName)
 		return false
 	}
 
@@ -1080,11 +1178,11 @@ func (m *ManagerImpl) isContainerAlreadyRunning(podUID, cntName string) bool {
 	// so on kubelet restart containers will again fail admission, hitting https://github.com/kubernetes/kubernetes/issues/118559 again.
 	// This scenario should however be rare enough.
 	if !m.containerRunningSet.Has(cntID) {
-		klog.V(4).InfoS("container not present in the initial running set", "podUID", podUID, "containerName", cntName, "containerID", cntID)
+		klog.V(4).InfoS("Container not present in the initial running set", "podUID", podUID, "containerName", cntName, "containerID", cntID)
 		return false
 	}
 
 	// Once we make it here we know we have a running container.
-	klog.V(4).InfoS("container found in the initial set, assumed running", "podUID", podUID, "containerName", cntName, "containerID", cntID)
+	klog.V(4).InfoS("Container found in the initial set, assumed running", "podUID", podUID, "containerName", cntName, "containerID", cntID)
 	return true
 }

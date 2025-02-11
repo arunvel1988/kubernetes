@@ -17,6 +17,7 @@ limitations under the License.
 package deployment
 
 import (
+	"k8s.io/utils/ptr"
 	"reflect"
 	"testing"
 
@@ -26,13 +27,15 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	podtest "k8s.io/kubernetes/pkg/api/pod/testing"
 	"k8s.io/kubernetes/pkg/apis/apps"
 	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/features"
 )
 
 const (
-	fakeImageName  = "fake-name"
-	fakeImage      = "fakeimage"
 	deploymentName = "test-deployment"
 	namespace      = "test-namespace"
 )
@@ -60,6 +63,70 @@ func TestStatusUpdates(t *testing.T) {
 		if !reflect.DeepEqual(test.expected, test.obj) {
 			t.Errorf("Unexpected object mismatch! Expected:\n%#v\ngot:\n%#v", test.expected, test.obj)
 		}
+	}
+}
+
+func TestStatusUpdatesWithDeploymentPodReplacementPolicy(t *testing.T) {
+	tests := []struct {
+		name                                 string
+		enableDeploymentPodReplacementPolicy bool
+		terminatingReplicas                  *int32
+		terminatingReplicasUpdate            *int32
+		expectedTerminatingReplicas          *int32
+	}{
+		{
+			name:                                 "should not allow updates when feature gate is disabled",
+			enableDeploymentPodReplacementPolicy: false,
+			terminatingReplicas:                  nil,
+			terminatingReplicasUpdate:            ptr.To[int32](2),
+			expectedTerminatingReplicas:          nil,
+		},
+		{
+			name:                                 "should allow update when the field is in use when feature gate is disabled",
+			enableDeploymentPodReplacementPolicy: false,
+			terminatingReplicas:                  ptr.To[int32](2),
+			terminatingReplicasUpdate:            ptr.To[int32](5),
+			expectedTerminatingReplicas:          ptr.To[int32](5),
+		},
+		{
+			name:                                 "should allow updates when feature gate is enabled",
+			enableDeploymentPodReplacementPolicy: true,
+			terminatingReplicas:                  nil,
+			terminatingReplicasUpdate:            ptr.To[int32](2),
+			expectedTerminatingReplicas:          ptr.To[int32](2),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DeploymentPodReplacementPolicy, tc.enableDeploymentPodReplacementPolicy)
+
+			ctx := genericapirequest.NewDefaultContext()
+			validSelector := map[string]string{"a": "b"}
+			oldDeploy := newDeploymentWithSelectorLabels(validSelector)
+			oldDeploy.Spec.Replicas = 3
+			oldDeploy.Status.Replicas = 3
+			oldDeploy.Status.TerminatingReplicas = tc.terminatingReplicas
+
+			newDeploy := newDeploymentWithSelectorLabels(validSelector)
+			newDeploy.Spec.Replicas = 3
+			newDeploy.Status.Replicas = 2
+			newDeploy.Status.TerminatingReplicas = tc.terminatingReplicasUpdate
+
+			StatusStrategy.PrepareForUpdate(ctx, newDeploy, oldDeploy)
+			if newDeploy.Status.Replicas != 2 {
+				t.Errorf("ReplicaSet status updates should allow change of replicas: %v", newDeploy.Status.Replicas)
+			}
+			if !ptr.Equal(newDeploy.Status.TerminatingReplicas, tc.expectedTerminatingReplicas) {
+				t.Errorf("ReplicaSet status updates failed, expected terminating pods: %v, got: %v", ptr.Deref(tc.expectedTerminatingReplicas, -1), ptr.Deref(newDeploy.Status.TerminatingReplicas, -1))
+			}
+
+			errs := StatusStrategy.ValidateUpdate(ctx, newDeploy, oldDeploy)
+
+			if len(errs) != 0 {
+				t.Errorf("Unexpected error %v", errs)
+			}
+		})
 	}
 }
 
@@ -175,11 +242,7 @@ func newDeploymentWithSelectorLabels(selectorLabels map[string]string) *apps.Dep
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: selectorLabels,
 				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers:    []api.Container{{Name: fakeImageName, Image: fakeImage, ImagePullPolicy: api.PullNever, TerminationMessagePolicy: api.TerminationMessageReadFile}},
-				},
+				Spec: podtest.MakePodSpec(),
 			},
 		},
 	}
@@ -210,15 +273,9 @@ func newDeploymentWithHugePageValue(resourceName api.ResourceName, value resourc
 					Name:      "foo",
 					Labels:    map[string]string{"foo": "bar"},
 				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers: []api.Container{{
-						Name:                     fakeImageName,
-						Image:                    fakeImage,
-						ImagePullPolicy:          api.PullNever,
-						TerminationMessagePolicy: api.TerminationMessageReadFile,
-						Resources: api.ResourceRequirements{
+				Spec: podtest.MakePodSpec(
+					podtest.SetContainers(podtest.MakeContainer("ctr", podtest.SetContainerResources(
+						api.ResourceRequirements{
 							Requests: api.ResourceList{
 								api.ResourceName(api.ResourceCPU): resource.MustParse("10"),
 								api.ResourceName(resourceName):    value,
@@ -227,8 +284,8 @@ func newDeploymentWithHugePageValue(resourceName api.ResourceName, value resourc
 								api.ResourceName(api.ResourceCPU): resource.MustParse("10"),
 								api.ResourceName(resourceName):    value,
 							},
-						}},
-					}},
+						}))),
+				),
 			},
 		},
 	}

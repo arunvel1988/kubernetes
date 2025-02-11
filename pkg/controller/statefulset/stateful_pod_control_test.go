@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/version"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -41,6 +42,7 @@ import (
 	_ "k8s.io/kubernetes/pkg/apis/apps/install"
 	_ "k8s.io/kubernetes/pkg/apis/core/install"
 	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/utils/ptr"
 )
 
 func TestStatefulPodControlCreatesPods(t *testing.T) {
@@ -502,7 +504,7 @@ func TestStatefulPodControlDeleteFailure(t *testing.T) {
 }
 
 func TestStatefulPodControlClaimsMatchDeletionPolcy(t *testing.T) {
-	// The claimOwnerMatchesSetAndPod is tested exhaustively in stateful_set_utils_test; this
+	// The isClaimOwnerUpToDate is tested exhaustively in stateful_set_utils_test; this
 	// test is for the wiring to the method tested there.
 	_, ctx := ktesting.NewTestContext(t)
 	fakeClient := &fake.Clientset{}
@@ -539,41 +541,68 @@ func TestStatefulPodControlClaimsMatchDeletionPolcy(t *testing.T) {
 func TestStatefulPodControlUpdatePodClaimForRetentionPolicy(t *testing.T) {
 	// All the update conditions are tested exhaustively in stateful_set_utils_test. This
 	// tests the wiring from the pod control to that method.
+
 	testFn := func(t *testing.T) {
 		_, ctx := ktesting.NewTestContext(t)
-		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StatefulSetAutoDeletePVC, true)
-		fakeClient := &fake.Clientset{}
-		indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-		claimLister := corelisters.NewPersistentVolumeClaimLister(indexer)
-		fakeClient.AddReactor("update", "persistentvolumeclaims", func(action core.Action) (bool, runtime.Object, error) {
-			update := action.(core.UpdateAction)
-			indexer.Update(update.GetObject())
-			return true, update.GetObject(), nil
-		})
-		set := newStatefulSet(3)
-		set.GetObjectMeta().SetUID("set-123")
-		pod := newStatefulSetPod(set, 0)
-		claims := getPersistentVolumeClaims(set, pod)
-		for k := range claims {
-			claim := claims[k]
-			indexer.Add(&claim)
+		testCases := []struct {
+			name      string
+			ownerRef  []metav1.OwnerReference
+			expectRef bool
+		}{
+			{
+				name:      "bare PVC",
+				expectRef: true,
+			},
+			{
+				name:      "PVC already controller",
+				ownerRef:  []metav1.OwnerReference{{Controller: ptr.To(true), Name: "foobar"}},
+				expectRef: false,
+			},
 		}
-		control := NewStatefulPodControl(fakeClient, nil, claimLister, &noopRecorder{})
-		set.Spec.PersistentVolumeClaimRetentionPolicy = &apps.StatefulSetPersistentVolumeClaimRetentionPolicy{
-			WhenDeleted: apps.DeletePersistentVolumeClaimRetentionPolicyType,
-			WhenScaled:  apps.RetainPersistentVolumeClaimRetentionPolicyType,
-		}
-		if err := control.UpdatePodClaimForRetentionPolicy(ctx, set, pod); err != nil {
-			t.Errorf("Unexpected error for UpdatePodClaimForRetentionPolicy (retain): %v", err)
-		}
-		expectRef := utilfeature.DefaultFeatureGate.Enabled(features.StatefulSetAutoDeletePVC)
-		for k := range claims {
-			claim, err := claimLister.PersistentVolumeClaims(claims[k].Namespace).Get(claims[k].Name)
-			if err != nil {
-				t.Errorf("Unexpected error getting Claim %s/%s: %v", claim.Namespace, claim.Name, err)
+
+		for _, tc := range testCases {
+			fakeClient := &fake.Clientset{}
+			indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+			claimLister := corelisters.NewPersistentVolumeClaimLister(indexer)
+			fakeClient.AddReactor("update", "persistentvolumeclaims", func(action core.Action) (bool, runtime.Object, error) {
+				update := action.(core.UpdateAction)
+				if err := indexer.Update(update.GetObject()); err != nil {
+					t.Fatalf("could not update index: %v", err)
+				}
+				return true, update.GetObject(), nil
+			})
+			set := newStatefulSet(3)
+			set.GetObjectMeta().SetUID("set-123")
+			pod0 := newStatefulSetPod(set, 0)
+			claims0 := getPersistentVolumeClaims(set, pod0)
+			for k := range claims0 {
+				claim := claims0[k]
+				if tc.ownerRef != nil {
+					claim.SetOwnerReferences(tc.ownerRef)
+				}
+				if err := indexer.Add(&claim); err != nil {
+					t.Errorf("Could not add claim %s: %v", k, err)
+				}
 			}
-			if hasOwnerRef(claim, set) != expectRef {
-				t.Errorf("Claim %s/%s bad set owner ref", claim.Namespace, claim.Name)
+			control := NewStatefulPodControl(fakeClient, nil, claimLister, &noopRecorder{})
+			set.Spec.PersistentVolumeClaimRetentionPolicy = &apps.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: apps.DeletePersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  apps.RetainPersistentVolumeClaimRetentionPolicyType,
+			}
+			if utilfeature.DefaultFeatureGate.Enabled(features.StatefulSetAutoDeletePVC) {
+				if err := control.UpdatePodClaimForRetentionPolicy(ctx, set, pod0); err != nil {
+					t.Errorf("Unexpected error for UpdatePodClaimForRetentionPolicy (retain), pod0: %v", err)
+				}
+			}
+			expectRef := tc.expectRef && utilfeature.DefaultFeatureGate.Enabled(features.StatefulSetAutoDeletePVC)
+			for k := range claims0 {
+				claim, err := claimLister.PersistentVolumeClaims(claims0[k].Namespace).Get(claims0[k].Name)
+				if err != nil {
+					t.Errorf("Unexpected error getting Claim %s/%s: %v", claim.Namespace, claim.Name, err)
+				}
+				if hasOwnerRef(claim, set) != expectRef {
+					t.Errorf("%s: Claim %s/%s bad set owner ref", tc.name, claim.Namespace, claim.Name)
+				}
 			}
 		}
 	}
@@ -582,6 +611,8 @@ func TestStatefulPodControlUpdatePodClaimForRetentionPolicy(t *testing.T) {
 		testFn(t)
 	})
 	t.Run("StatefulSetAutoDeletePVCDisabled", func(t *testing.T) {
+		// TODO: this will be removed in 1.35
+		featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.31"))
 		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StatefulSetAutoDeletePVC, false)
 		testFn(t)
 	})
@@ -663,12 +694,22 @@ func TestPodClaimIsStale(t *testing.T) {
 				claimIndexer.Add(&claim)
 			case stale:
 				claim.SetOwnerReferences([]metav1.OwnerReference{
-					{Name: "set-3", UID: types.UID("stale")},
+					{
+						Name:       "set-3",
+						UID:        types.UID("stale"),
+						APIVersion: "v1",
+						Kind:       "Pod",
+					},
 				})
 				claimIndexer.Add(&claim)
 			case withRef:
 				claim.SetOwnerReferences([]metav1.OwnerReference{
-					{Name: "set-3", UID: types.UID("123")},
+					{
+						Name:       "set-3",
+						UID:        types.UID("123"),
+						APIVersion: "v1",
+						Kind:       "Pod",
+					},
 				})
 				claimIndexer.Add(&claim)
 			}
@@ -703,15 +744,20 @@ func TestStatefulPodControlRetainDeletionPolicyUpdate(t *testing.T) {
 		podLister := corelisters.NewPodLister(podIndexer)
 		claimIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 		claimLister := corelisters.NewPersistentVolumeClaimLister(claimIndexer)
-		podIndexer.Add(pod)
+		if err := podIndexer.Add(pod); err != nil {
+			t.Errorf("couldn't add %s to index: %v", pod.GetName(), err)
+		}
 		claims := getPersistentVolumeClaims(set, pod)
 		if len(claims) < 1 {
 			t.Errorf("Unexpected missing PVCs")
 		}
 		for k := range claims {
 			claim := claims[k]
-			setOwnerRef(&claim, set, &set.TypeMeta) // This ownerRef should be removed in the update.
-			claimIndexer.Add(&claim)
+			// This ownerRef should be removed in the update.
+			claim.SetOwnerReferences(addControllerRef(claim.GetOwnerReferences(), set, controllerKind))
+			if err := claimIndexer.Add(&claim); err != nil {
+				t.Errorf("couldn't add %s to index: %v", claim.GetName(), err)
+			}
 		}
 		control := NewStatefulPodControl(fakeClient, podLister, claimLister, recorder)
 		if err := control.UpdateStatefulPod(ctx, set, pod); err != nil {
@@ -739,6 +785,8 @@ func TestStatefulPodControlRetainDeletionPolicyUpdate(t *testing.T) {
 		testFn(t)
 	})
 	t.Run("StatefulSetAutoDeletePVCDisabled", func(t *testing.T) {
+		// TODO: this will be removed in 1.35
+		featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.31"))
 		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StatefulSetAutoDeletePVC, false)
 		testFn(t)
 	})
@@ -746,8 +794,6 @@ func TestStatefulPodControlRetainDeletionPolicyUpdate(t *testing.T) {
 
 func TestStatefulPodControlRetentionPolicyUpdate(t *testing.T) {
 	_, ctx := ktesting.NewTestContext(t)
-	// Only applicable when the feature gate is on; the off case is tested in TestStatefulPodControlRetainRetentionPolicyUpdate.
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StatefulSetAutoDeletePVC, true)
 
 	recorder := record.NewFakeRecorder(10)
 	set := newStatefulSet(1)
@@ -795,8 +841,6 @@ func TestStatefulPodControlRetentionPolicyUpdate(t *testing.T) {
 
 func TestStatefulPodControlRetentionPolicyUpdateMissingClaims(t *testing.T) {
 	_, ctx := ktesting.NewTestContext(t)
-	// Only applicable when the feature gate is on.
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StatefulSetAutoDeletePVC, true)
 
 	recorder := record.NewFakeRecorder(10)
 	set := newStatefulSet(1)
